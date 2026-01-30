@@ -1440,35 +1440,35 @@ contains
     use index_conversion, only : global2local
     integer, intent(in) :: n_dim, degree, n_terms
     integer, dimension(n_dim,n_terms), intent(out) :: exponents
-    integer, dimension(0:degree+1),      intent(out) :: idx
+    integer, dimension(0:degree),      intent(out) :: idx
     integer, dimension(n_dim,n_terms), optional, intent(out) :: diff_idx
     integer :: curr_total_degree, i, j, cnt, N_full_terms
     integer, dimension(n_dim) :: tmp_exp, nsub
     cnt = 0
-    idx(0) = 0
     do curr_total_degree = 0,degree
       ! idx(curr_total_degree+1) = cnt + 1
+      nSub = curr_total_degree + 1
       N_full_terms = (curr_total_degree+1) ** n_dim
       do j = 0,N_full_terms
-        nSub = curr_total_degree + 1
         tmp_exp = global2local(j+1,nsub)-1
         if ( sum(tmp_exp) == curr_total_degree ) then
           cnt = cnt + 1
           exponents(:,cnt) = tmp_exp
         end if
       end do
-      idx(curr_total_degree+1) = cnt
+      idx(curr_total_degree) = cnt
       tmp_exp = 0
     end do
 
     ! determine corresponding gradient terms of a given term
     if (present(diff_idx)) then
       diff_idx = -1 ! last terms (idx(degree)+1:idx(degree+1)) are not defined
-      do j = 1,idx(degree)
+      if ( degree==0) return
+      do j = 1,idx(degree-1)
         tmp_exp = exponents(:,j)
         curr_total_degree = sum(tmp_exp)
         cnt = 0
-        do i = idx(curr_total_degree+1),idx(curr_total_degree+2)
+        do i = idx(curr_total_degree)+1,idx(curr_total_degree+1)
           if ( sum( abs( exponents(:,i) - tmp_exp ) )==1 ) then
             cnt = cnt + 1
             diff_idx(cnt,j) = i
@@ -4025,7 +4025,7 @@ contains
     this%n_dim   = n_dim
     this%n_terms = nchoosek( n_dim + total_degree, total_degree )
     allocate( this%exponents( this%n_dim, this%n_terms ) )
-    allocate( this%idx(0:this%total_degree+1) )
+    allocate( this%idx(0:this%total_degree) )
     allocate( this%diff_idx( this%n_dim, this%n_terms ) )
     call get_exponents( this%n_dim, this%total_degree, this%n_terms,           &
                         this%exponents, this%idx, diff_idx=this%diff_idx )
@@ -4964,9 +4964,9 @@ contains
     call this%destroy()
     this%total_degree = total_degree
     this%n_vars       = n_vars
-    allocate( this%v_min( total_degree, n_vars ) )
-    allocate( this%v_max( total_degree, n_vars ) )
-    allocate( this%alpha( total_degree, n_vars ) )
+    allocate( this%v_min( 0:total_degree, n_vars ) )
+    allocate( this%v_max( 0:total_degree, n_vars ) )
+    allocate( this%alpha( 1:total_degree, n_vars ) )
     allocate( this%var_idx( n_vars ) )
     this%var_idx = var_idx
     this%v_min =  large
@@ -4987,6 +4987,11 @@ contains
 
     ! loop over all variables and coefficients
     do v = 1,this%n_vars
+      ! val(v) = this%coefs(1,var_idx(v)) ! cell average
+      !     do d = 1,p%total_degree
+      !       do n = p%idx(d)+1,p%idx(d+1)
+      this%v_min(0,v) = min( this%v_min(0,v), tcoefs(1,v) )
+      this%v_max(0,v) = max( this%v_max(0,v), tcoefs(1,v) )
       do d = 1,p%total_degree ! (grouped by total degree)
         do term = p%idx(d-1)+1,p%idx(d)
           this%v_min(d,v) = min( this%v_min(d,v), tcoefs(term,v) )
@@ -5063,26 +5068,34 @@ contains
     ! transform coefficients to get derivatives at reference point
     tcoefs = basis%transform_coefs(p,coefs,p%n_terms,this%n_vars,this%var_idx)
     dx = point(1:p%n_dim) - basis%x_ref ! x_i - x_c
-    this%alpha = one
     do v = 1,this%n_vars
-      ! start at the highest degree
-      do d = p%total_degree,1,-1
-        do term = p%idx(d-1)+1,p%idx(d)
+      ! start at the highest degree (-1)
+      do d = p%total_degree-1,0,-1
+
+        ! for each term with this total degree:
+        do term = p%idx(d),p%idx(d+1)-1
           grad_idx = p%diff_idx(:,term) ! indices to extract gradient information
           grad = tcoefs(grad_idx,v)
+          ! add contributions from higher-order terms
+          ! do d2 = p%total_degree,d,-1
+          !   do term2 = p
+          !   grad = grad + 
+          ! end do
+          alpha = zero
           associate( u_c   => tcoefs(term,v),  &
                      u_min => this%v_min(d,v), &
                      u_max => this%v_max(d,v) )
             alpha = get_alpha_val(p%n_dim,grad,dx,u_c,u_min,u_max)
-            this%alpha(d,v) = min( this%alpha(d,v), alpha )
+            this%alpha(d+1,v) = min( this%alpha(d+1,v), alpha )
             ! this%alpha(d,v) = min( this%alpha(d,v), get_alpha_val(p%n_dim,grad,dx,u_c,u_min,u_max) )
           end associate
         end do
+
         ! alpha_e^(p) := max_{p<=q} alpha_e^(q), p>=1
-        ! this%alpha(d,v) = maxval(this%alpha(d:p%total_degree,v))
+        this%alpha(d+1,v) = maxval(this%alpha(d+1:p%total_degree,v))
 
         ! as soon as alpha_e^(q)=1 is encountered, no further limiting is required
-        if ( abs(this%alpha(d,v) - one )< near_zero ) exit
+        if ( abs(this%alpha(d+1,v) - one )< near_zero ) exit
       end do
       ! first derivatives
       ! this%alpha(1,v) = max(this%alpha(1,v),this%alpha(2,v))
@@ -5198,7 +5211,7 @@ contains
           vv = findloc(lim%var_idx,var_idx(v),dim=1)
           val(v) = this%coefs(1,var_idx(v)) ! cell average
           do d = 1,p%total_degree
-            do n = p%idx(d)+1,p%idx(d+1)
+            do n = p%idx(d-1)+1,p%idx(d)
               val(v) = val(v) + lim%alpha(d,vv) * this%coefs(n,var_idx(v)) * local_basis(n)
             end do
           end do
@@ -5239,9 +5252,8 @@ contains
       do v = 1,n_var
         if ( any(lim%var_idx==var_idx(v)) ) then
           vv = findloc(lim%var_idx,var_idx(v),dim=1)
-          val(v) = this%coefs(1,var_idx(v)) ! cell average
           do d = 1,p%total_degree
-            do n = p%idx(d)+1,p%idx(d+1)
+            do n = p%idx(d-1)+1,p%idx(d)
               val(v) = val(v) + lim%alpha(d,vv) * this%coefs(n,var_idx(v)) * local_basis(n)
             end do
           end do
@@ -5628,9 +5640,10 @@ contains
     nbor_block(1:n_nbors-1) = tmp(2:n_nbors)
     tmp = nbor_idx
     nbor_idx(1:n_nbors-1) = tmp(2:n_nbors)
-    n_nbors = n_nbors - 1
     tmp = degree
     degree(1:n_nbors-1) = tmp(2:n_nbors)
+
+    n_nbors = n_nbors - 1
   end subroutine get_nbors
 
     pure subroutine get_cell_LHS( this, lin_idx, term_end, LHS_m, LHS_n, LHS, scale, col_scale )
@@ -5777,9 +5790,10 @@ contains
   end function constructor
 
   pure subroutine update_limiter_block( this, rblock, gblock )
-    use set_constants,     only : large
+    use set_precision,     only : dp
+    use set_constants,     only : one, large
     use index_conversion,  only : global2local
-    use grid_derived_type, only : grid_block
+    use grid_derived_type, only : grid_block, pack_cell_node_coords
     class(limiter_block_t), intent(inout) :: this
     type(rec_block_t),      intent(in)    :: rblock
     type(grid_block),       intent(in)    :: gblock
@@ -5787,12 +5801,14 @@ contains
     integer, dimension(3) :: idx
     integer, dimension(:,:), allocatable :: debug_nbor_idx
     integer, dimension(6) :: face_nbors
-    integer :: n_face_nbors
+    integer :: n_face_nbors, n_cell_nodes
+    real(dp), dimension(3,product(rblock%n_skip+1)) :: nodes
     
     ! first get the min-max values for coefficients
     do i = 1,this%n_cells_total
       this%lim(i)%v_max = -large
       this%lim(i)%v_min =  large
+      this%lim(i)%alpha = one
       ! if ( i == 4160 ) then
       !   n_interior = rblock%cells(i)%n_interior
       !   allocate( debug_nbor_idx(3,n_interior+1) )
@@ -5816,13 +5832,31 @@ contains
     end do
 
     ! now calculate limiter values
+    ! do i = 1,this%n_cells_total
+    !   idx = global2local(i,gblock%n_cells)
+    !   associate( quad => gblock%grid_vars%quad(idx(1),idx(2),idx(3)) )
+    !   do n = 1,quad%n_quad
+    !     call this%lim(i)%update_limiter(rblock%p,rblock%cells(i)%basis,quad%quad_pts(:,n),rblock%cells(i)%coefs)
+    !   end do
+    !   end associate
+    ! end do
+
+
+    
+
+    ! allocate( nodes(3,n_cell_nodes) )
+    ! lo = [1,1,1]
+    ! hi = gblock%n_nodes
+    ! nodes = pack_cell_node_coords( idx, lo, hi, this%n_skip, gblock%node_coords )
+
+    n_cell_nodes = product(rblock%n_skip+1)
+
     do i = 1,this%n_cells_total
       idx = global2local(i,gblock%n_cells)
-      associate( quad => gblock%grid_vars%quad(idx(1),idx(2),idx(3)) )
-      do n = 1,quad%n_quad
-        call this%lim(i)%update_limiter(rblock%p,rblock%cells(i)%basis,quad%quad_pts(:,n),rblock%cells(i)%coefs)
+      nodes = pack_cell_node_coords( global2local(i,gblock%n_cells), [1,1,1], gblock%n_nodes, rblock%n_skip, gblock%node_coords )
+      do n = 1,n_cell_nodes
+        call this%lim(i)%update_limiter(rblock%p,rblock%cells(i)%basis,nodes(:,n),rblock%cells(i)%coefs)
       end do
-      end associate
     end do
 
   end subroutine update_limiter_block
@@ -6501,7 +6535,7 @@ program main
   degree  = 2
   n_vars  = 1
   n_dim   = 1
-  n_nodes = [129,1,1]
+  n_nodes = [17,1,1]
   n_ghost = [0,0,0]
   n_skip  = [1,1,1]
   old = .false.
