@@ -31,6 +31,60 @@ module set_constants
   integer,  parameter :: max_text_line_length = 1024
 end module set_constants
 
+module project_inputs
+  use set_constants, only : zero, one, max_text_line_length
+  use set_precision, only : dp
+  implicit none
+  private
+  public :: allocate_inputs, deallocate_inputs
+  public :: job_name, verbose_level
+  public :: n_dim, rec_degree, n_rec_vars, n_nodes, n_ghost, n_skip, old, limit
+  public :: geom_space_r, grid_perturb
+  public :: out_quad_order, out_derivatives
+  ! public :: space_coefs, time_coefs
+  public :: space_scale, space_origin
+  public :: time_scale, time_origin
+  public :: rand_coefs, rand_seed, test_function
+
+  character(max_text_line_length) :: job_name = 'test'
+  integer :: verbose_level = 0
+  integer :: n_dim         = 1
+  integer :: rec_degree    = 2
+  integer :: n_rec_vars    = 1
+  integer, dimension(3) :: n_nodes       = [9,1,1]
+  integer, dimension(3) :: n_ghost       = [0,0,0]
+  integer, dimension(3) :: n_skip        = [1,1,1]
+  logical  :: old           = .false.
+  logical  :: limit         = .false.
+  real(dp) :: geom_space_r = 1.1_dp
+  real(dp) :: grid_perturb = zero
+  integer  :: out_quad_order=1
+  logical  :: out_derivatives=.false.
+
+  logical :: rand_coefs    = .false.
+  integer :: rand_seed     = 1
+  integer :: test_function=1
+  ! real(dp), dimension(:,:), allocatable :: space_coefs, time_coefs
+  real(dp), dimension(:,:), allocatable :: space_scale, space_origin
+  real(dp), dimension(:),   allocatable :: time_scale, time_origin
+
+contains
+  subroutine allocate_inputs()
+    allocate(space_scale(n_dim,n_rec_vars))
+    allocate(space_origin(n_dim,n_rec_vars))
+    allocate(time_scale(n_rec_vars))
+    allocate(time_origin(n_rec_vars))
+  end subroutine allocate_inputs
+
+  subroutine deallocate_inputs()
+    if ( allocated(space_scale)  ) deallocate(space_scale )
+    if ( allocated(space_origin) ) deallocate(space_origin)
+    if ( allocated(time_scale)   ) deallocate(time_scale  )
+    if ( allocated(time_origin)  ) deallocate(time_origin )
+  end subroutine deallocate_inputs
+
+end module project_inputs
+
 module string_stuff
   implicit none
   private
@@ -44,20 +98,14 @@ contains
     integer :: j, sz
     character(20) :: tmp_debug
     sz = size(integer_list)
-    write(out_string,'(A)') ''
-    do j = 1,sz-1
+    out_string=''
+    if (sz<1) return
+    write(out_string,'(I0)') integer_list(1)
+    do j = 2,sz
       write(out_string,'(A,I0)') trim(out_string)//',',integer_list(j)
     end do
-    write(out_string,'(A,I0)') trim(out_string),integer_list(sz)
-
-
-    ! write(tmp_debug,'(A)') ''
-    ! write(tmp_debug,'(A)') trim(tmp_debug)
-    ! do j = 1,sz-1
-    !   write(tmp_debug,'(A,I0)') trim(tmp_debug)//',',integer_list(j)
-    ! end do
-    
   end subroutine write_integer_tuple
+  
   subroutine generate_newline_string(strings,out_fmt)
     character(*), dimension(:), intent(in)  :: strings
     character(*)              , intent(out) :: out_fmt
@@ -102,13 +150,6 @@ contains
   end subroutine iteration_line
 end module string_stuff
 
-module project_inputs
-  implicit none
-  private
-  public :: verbose_level
-  integer :: verbose_level = 0
-end module project_inputs
-
 module message
   use ISO_FORTRAN_ENV, only : error_unit
   implicit none
@@ -147,6 +188,270 @@ contains
   end function warning_message
 
 end module message
+
+module file_routines
+  implicit none
+  private
+  public :: open_existing_file
+  public :: merge_files
+contains
+  function open_existing_file( filename, append ) result(fid)
+    use project_inputs, only : verbose_level
+    use message,        only : warning_message, error_message, WARN_RARELY
+    character(*),      intent(in) :: filename
+    logical,           intent(in) :: append
+    logical :: exists, err
+    integer :: fid
+    character(*), parameter :: routine_name = 'open_existing_file'
+
+    inquire( file=trim(filename), exist=exists )
+    if ( .not. exists ) then
+      err = error_message( routine_name, ' Attempting to open '//trim(filename)//'... Failed. File does not exist. Stopping.' )
+    else
+      if( append ) then
+        open( newunit=fid, file=trim(filename), status='old', position='append' )
+      else
+        open( newunit=fid, file=trim(filename), status='old' )
+      end if
+      err = warning_message( WARN_RARELY, routine_name, ' Attempting to open '//trim(filename)//'... Success!' )
+    end if
+  end function open_existing_file
+
+  subroutine merge_files( pattern, file_name )
+    character(*),               intent(in) :: pattern
+    character(*),               intent(in) :: file_name
+    integer :: N_files, i, fid, fid_tmp
+    
+    ! concatenate files
+    call system('cat '//trim(pattern)//' >> '//trim(file_name))
+
+    ! archive in case you fucked something up
+    call system('tar -cf '//trim(file_name)//'.backup.tar '//trim(pattern))
+
+    ! remove tmp files
+    call system('rm '//trim(pattern))
+  end subroutine merge_files
+end module file_routines
+
+module namelist_helper
+  use set_constants,  only : MAX_TEXT_LINE_LENGTH
+  implicit none
+  private
+  public :: nml_warnings, check_for_input_error
+contains
+  subroutine nml_warnings( nml_unit, err, name, quiet, err_tot, required )
+    integer,           intent(in)    :: nml_unit
+    integer,           intent(in)    :: err
+    character(*),      intent(in)    :: name
+    logical,           intent(in)    :: quiet
+    integer,           intent(inout) :: err_tot
+    logical, optional, intent(in)    :: required
+    logical :: flag
+    character(MAX_TEXT_LINE_LENGTH) :: line
+    flag = .false.
+    if (present(required)) flag = required
+
+    if ( err < 0 ) then
+      if (flag) then
+          write(*,'(A)') "NML "//trim(name)//" not found"
+          write(*,'(A)') "This is a required namelist!"
+          err_tot = err_tot+1
+      else
+        if ( .not. quiet ) then
+          write(*,'(A)') "NML "//trim(name)//" not found, using defaults."
+        end if
+      end if
+      
+    else if ( err > 0 ) then
+      write(*,'(A)') "WARNING: Error in NML "//trim(name)//" inputs!"
+      backspace(nml_unit)
+      backspace(nml_unit)
+      read(nml_unit,fmt='(A)') line
+      write(*,'(A)') "    Invalid line in namelist: "//trim(line)
+      write(*,*)
+      err_tot = err_tot + 1
+    end if
+  end subroutine nml_warnings
+
+  subroutine check_for_input_error( var, var_default, condition, option_error, &
+                                     namelist_name, message )
+    use set_precision, only : dp
+    real(dp),     intent(inout) :: var
+    real(dp),     intent(in)    :: var_default
+    logical,      intent(in)    :: condition
+    integer,      intent(inout) :: option_error
+    character(*), intent(in)    :: namelist_name
+    character(*), intent(in)    :: message
+    if ( condition ) then
+      write(*,*) ""
+      write(*,'(A)') "Error in NML "//trim(namelist_name)//":"
+      write(*,'(A)') "  "//trim(message)
+      option_error = option_error+1
+      ! set to default to avoid tripping other unrelated checks
+      var = var_default
+    end if
+  end subroutine check_for_input_error
+end module namelist_helper
+
+module nml_project
+  use namelist_helper, only : nml_warnings
+  use project_inputs, only : job_name, verbose_level, n_dim, rec_degree, n_rec_vars,     &
+                             n_nodes, n_ghost, n_skip, old, limit,             &
+                             grid_perturb, geom_space_r, out_quad_order, out_derivatives
+  implicit none
+  private
+  public :: read_nml_project
+  public :: write_nml_project
+  namelist /project/ job_name, verbose_level, n_dim, n_rec_vars, rec_degree, n_nodes,    &
+                     n_ghost, n_skip, old, limit, grid_perturb, geom_space_r, out_quad_order, out_derivatives
+contains
+  subroutine read_nml_project( nml_unit, quiet, err_tot, option_error )
+    use project_inputs, only : allocate_inputs
+    use set_constants,  only : zero, one
+    integer, intent(in)    :: nml_unit
+    logical, intent(in)    :: quiet
+    integer, intent(inout) :: err_tot
+    integer, intent(inout) :: option_error
+    integer :: ierr
+    ! PROJECT Namelist
+    job_name = 'test'
+    verbose_level = 0
+    n_dim         = 1
+    rec_degree    = 2
+    n_rec_vars    = 1
+    n_nodes       = [9,1,1]
+    n_ghost       = [0,0,0]
+    n_skip        = [1,1,1]
+    old           = .false.
+    limit         = .false.
+    grid_perturb  = zero
+    geom_space_r  = one
+    out_quad_order=1
+    out_derivatives=.false.
+    rewind( nml_unit )
+    read( nml_unit, nml = project, iostat = ierr )
+    call nml_warnings( nml_unit, ierr, 'PROJECT', quiet, err_tot )
+    call check_nml_project( option_error )
+    call allocate_inputs()
+  end subroutine read_nml_project
+
+  subroutine write_nml_project( nml_unit )
+    integer, intent(in) :: nml_unit
+    integer :: ierr
+    write( nml_unit, nml = project, iostat = ierr )
+  end subroutine write_nml_project
+  subroutine check_nml_project( option_error )
+    integer, intent(inout) :: option_error
+    continue
+  end subroutine check_nml_project
+end module nml_project
+
+module nml_exact
+  use namelist_helper, only : nml_warnings
+  use project_inputs, only : n_dim, n_rec_vars
+  use project_inputs, only : rand_coefs, rand_seed, space_scale, space_origin, &
+                             time_scale, time_origin, test_function
+  implicit none
+  private
+  public :: read_nml_exact
+  public :: write_nml_exact
+  namelist /exact/ rand_coefs, rand_seed, space_scale, space_origin,           &
+                   time_scale, time_origin, test_function
+contains
+  subroutine read_nml_exact( nml_unit, quiet, err_tot, option_error )
+    use project_inputs, only : allocate_inputs
+    use set_constants,  only : zero, one
+    integer, intent(in)    :: nml_unit
+    logical, intent(in)    :: quiet
+    integer, intent(inout) :: err_tot
+    integer, intent(inout) :: option_error
+    integer :: ierr
+    ! EXACT Namelist
+    rand_coefs    = .false.
+    rand_seed     = 1
+    space_scale   = one
+    space_origin  = zero
+    time_scale    = one
+    time_origin   = zero
+    rewind( nml_unit )
+    read( nml_unit, nml = exact, iostat = ierr )
+    call nml_warnings( nml_unit, ierr, 'EXACT', quiet, err_tot )
+    call check_nml_exact( option_error )
+  end subroutine read_nml_exact
+  subroutine write_nml_exact( nml_unit )
+    integer, intent(in) :: nml_unit
+    integer :: ierr
+    write( nml_unit, nml = exact, iostat = ierr )
+  end subroutine write_nml_exact
+  subroutine check_nml_exact( option_error )
+    integer, intent(inout) :: option_error
+    continue
+  end subroutine check_nml_exact
+end module nml_exact
+
+module namelist
+  use namelist_helper, only : nml_warnings
+  implicit none
+  private
+  public :: read_nml, write_nml
+contains
+  subroutine read_nml( )
+    use set_precision,        only : dp
+    use project_inputs,       only : verbose_level
+    use message,              only : WARN_SOMETIMES
+    use file_routines,        only : open_existing_file
+    use nml_project,          only : read_nml_project
+    use nml_exact,            only : read_nml_exact
+    logical :: quiet
+    integer :: nml_unit, err_tot, option_error
+
+    quiet = WARN_SOMETIMES > verbose_level
+    err_tot = 0
+    option_error = 0
+    nml_unit = open_existing_file( 'project.nml', append=.false. )
+    if ( .not. quiet ) then
+      write(*,*) 'Reading project.nml...'
+    end if
+    quiet = .false.
+    call read_nml_project( nml_unit, quiet, err_tot, option_error )
+    quiet = WARN_SOMETIMES > verbose_level
+    call read_nml_exact( nml_unit, quiet, err_tot, option_error )
+    close(nml_unit)
+
+    if ( err_tot /= 0 .or. option_error /= 0 ) then
+      write(*,*)
+      write(*,*) "STOPPING: Errors in project.nml!"
+      write(*,*) ""
+      write(*,'(a,i10)') 'Total # of Errors found: ',(err_tot + option_error)
+      write(*,*) ""
+      write(*,*) "Review the above WARNINGS and fix before continuing!"
+      write(*,*) "See project.nml.updated for an up-to-date version."
+      write(*,*) ""
+      call write_nml('updated')
+      stop
+    end if
+  end subroutine read_nml
+
+  subroutine write_nml(str)
+    use nml_project,          only : write_nml_project
+    character(*), intent(in), optional :: str
+    integer       :: nml_unit, err_tot
+    character(16) :: today_str
+    character(12), dimension(3) :: now
+    call date_and_time( now(1), now(2), now(3) )
+    today_str = now(1)(1:4)//'-'//now(1)(5:6)//'-'//now(1)(7:8)//'_'//         &
+                now(2)(1:2)//'.'//now(2)(3:4)
+    err_tot = 0
+    if (present(str)) then
+      open(newunit=nml_unit, file='project.nml.'//trim(str), status='unknown')
+    else
+      open(newunit=nml_unit, file='project.nml.'//trim(today_str),              &
+        status='unknown')
+    end if
+    call write_nml_project(          nml_unit )
+    close(nml_unit)
+  end subroutine write_nml
+end module namelist
 
 module timer_derived_type
 
@@ -4027,6 +4332,7 @@ module monomial_basis_derived_type
     procedure, public, pass :: eval  => evaluate_monomial
     procedure, public, pass :: deval => evaluate_monomial_derivative
     procedure, public, pass :: destroy => destroy_monomial_basis_t
+    procedure, public, pass :: check_gradient_indexing
   end type monomial_basis_t
 
   interface monomial_basis_t
@@ -4106,6 +4412,33 @@ contains
       end do
     end do
   end subroutine evaluate_monomial_derivative
+
+  subroutine check_gradient_indexing( this )
+    use set_constants, only : max_text_line_length
+    use string_stuff, only : write_integer_tuple
+    class(monomial_basis_t), intent(in)  :: this
+    integer :: d, term
+    integer, dimension(this%n_dim) :: grad_idx
+    character(max_text_line_length) :: tmp_string, out_string
+    ! do d = this%total_degree-1,0,-1
+    !   ! for each term with this total degree:
+    !   do term = this%idx(d),this%idx(d+1)-1
+    write(*,*) this%idx
+    do d = this%total_degree-1,1,-1
+      ! for each term with this total degree:
+      do term = this%idx(d-1),this%idx(d)-1
+        grad_idx = this%diff_idx(:,term) ! indices to extract gradient information
+        out_string=''
+        call write_integer_tuple([d,term],tmp_string)
+        write(out_string,'(A,A)') trim(out_string),trim(tmp_string)//' : '
+        call write_integer_tuple(this%exponents(:,term),tmp_string)
+        write(out_string,'(A,A)') trim(out_string),'['//trim(tmp_string)//'] : '
+        call write_integer_tuple(grad_idx,tmp_string)
+        write(out_string,'(A,A)') trim(out_string),'('//trim(tmp_string)//')'
+        write(*,'(A)') trim(out_string)
+      end do
+    end do
+  end subroutine check_gradient_indexing
 
 end module monomial_basis_derived_type
 
@@ -4201,7 +4534,9 @@ contains
     real(dp), dimension(:), intent(in) :: x
     real(dp), optional,     intent(in) :: t
     real(dp), dimension(this%n_eq)     :: q
-    q = 999.0_dp * x(1) - 888.0_dp * x(2) + 777.0_dp * x(3) - 666.0_dp
+    real(dp), dimension(3), parameter :: coefs = [999.0_dp, 888.0_dp, 777.0_dp]
+    ! q = 999.0_dp * x(1) - 888.0_dp * x(2) + 777.0_dp * x(3) - 666.0_dp
+    q = dot_product(x,coefs(1:size(x))) - 666.0_dp
   end function eval_test_fun1
 
 end module test_function_1
@@ -4285,7 +4620,7 @@ contains
     this%dt = one
     this%dx = one
     this%t0 = zero
-    this%x0 = zero
+    this%x0 = 0.75_dp
     if ( present(space_scale) ) then
       this%dx = sign(one,space_scale) * max(near_zero,abs(space_scale))
     end if
@@ -6507,8 +6842,9 @@ module test_problem
   private
   ! public :: setup_grid_and_rec_2
   public :: setup_grid
-  public :: setup_reconstruction1
+  public :: setup_reconstruction
   public :: geom_space_wrapper
+  public :: make_eval_function, make_grid, make_reconstruction
   interface setup_grid
     module procedure setup_grid_generate
     ! module procedure setup_grid_read
@@ -6516,13 +6852,15 @@ module test_problem
 contains
 
   pure function geom_space_wrapper(x_in) result(x_out)
+    use project_inputs, only : geom_space_r
     real(dp), dimension(:), intent(in) :: x_in
     real(dp), dimension(size(x_in))    :: x_out
-    x_out = geom_space(x_in,1.1_dp)
+    x_out = geom_space(x_in,geom_space_r)
   end function geom_space_wrapper
 
   pure function geom_space(x_in,r) result(x_out)
-    use set_constants, only : zero, one
+    use set_constants, only : zero, one, near_zero
+    use linspace_helper, only : linspace
     real(dp), dimension(:), intent(in) :: x_in
     real(dp),               intent(in) :: r
     real(dp), dimension(size(x_in))    :: x_out
@@ -6530,20 +6868,24 @@ contains
     integer :: i, j, N
     N = size(x_in)
     x_out = zero
-    x_out(1) = x_in(1)
-    x_out(N) = x_in(N)
-    dx0 = one
-    do i = 1,N-2
-      dx0 = dx0 + r**i
-    end do
-    dx0 = ( x_in(N) - x_in(1) ) / dx0
-    do i = 2,N-1
-      dx = dx0
-      do j = 1,i-2
-        dx = dx * r
+    if ( abs(r-one)<near_zero) then
+      x_out = linspace(N,x_in(1),x_in(N))
+    else
+      x_out(1) = x_in(1)
+      x_out(N) = x_in(N)
+      dx0 = one
+      do i = 1,N-2
+        dx0 = dx0 + r**i
       end do
-      x_out(i) = x_out(i-1) + dx
-    end do
+      dx0 = ( x_in(N) - x_in(1) ) / dx0
+      do i = 2,N-1
+        dx = dx0
+        do j = 1,i-2
+          dx = dx * r
+        end do
+        x_out(i) = x_out(i-1) + dx
+      end do
+    end if
   end function geom_space
 
   subroutine setup_grid_generate( n_dim, n_nodes, n_ghost, grid, delta,        &
@@ -6578,7 +6920,7 @@ contains
     call grid%gblock(1)%grid_vars%setup( grid%gblock(1) )
   end subroutine setup_grid_generate
 
-  subroutine setup_reconstruction1( grid, n_dim, n_vars, degree, rec, eval_fun, limit )
+  subroutine setup_reconstruction( grid, n_dim, n_vars, degree, rec, eval_fun, limit )
     use grid_derived_type,    only : grid_type
     use rec_derived_type,     only : rec_t
     use function_holder_type, only : func_h_t
@@ -6588,91 +6930,101 @@ contains
     class(func_h_t), optional, intent(in)  :: eval_fun
     logical,         optional, intent(in)  :: limit
     rec = rec_t( grid, n_dim, degree, n_vars, ext_fun=eval_fun, limit=limit )
-  end subroutine setup_reconstruction1
+  end subroutine setup_reconstruction
+
+  subroutine make_eval_function(eval_fun)
+    use project_inputs,       only : test_function, space_origin, space_scale, &
+                                     time_origin, time_scale, rand_coefs,      &
+                                     rand_seed, n_dim, n_rec_vars
+    use function_holder_type, only : func_h_t
+    use test_function_1,      only : test_fun1_t
+    use test_function_2,      only : test_fun2_t
+    use cross_term_sinusoid,  only : cts_t
+    use cylinder_cone_bump,   only : ccb_t
+    use message,              only : error_message
+    class(func_h_t), allocatable, intent(out) :: eval_fun
+    character(*), parameter :: routine_name = 'set_eval_function'
+    logical :: err
+    select case(test_function)
+    case(1)
+      allocate( eval_fun, source=test_fun1_t( n_dim, n_rec_vars ) )
+    case(2)
+      allocate( eval_fun, source=test_fun2_t( n_dim, n_rec_vars ) )
+    case(3)
+      allocate( eval_fun, source=cts_t( n_dim, n_rec_vars,       &
+                                    rand_coefs=rand_coefs,   &
+                                    rand_seed=rand_seed,     &
+                                    space_scale=space_scale, &
+                                    space_origin=space_origin) )
+    case(4)
+      allocate( eval_fun, source=ccb_t( n_dim, n_rec_vars,       &
+                                    space_scale=space_scale, &
+                                    space_origin=space_origin) )
+    case default
+      err = error_message(routine_name,'test_function must be 1-4')
+    end select
+  end subroutine make_eval_function
+
+  subroutine make_grid( grid )
+    use project_inputs,       only : n_dim, n_nodes, n_ghost, grid_perturb
+    use grid_derived_type,    only : grid_type
+    type(grid_type), intent(inout) :: grid
+    call setup_grid( n_dim, n_nodes, n_ghost, grid, delta=grid_perturb, x1_map=geom_space_wrapper )
+  end subroutine make_grid
+
+  subroutine make_reconstruction( grid, eval_fun, rec )
+    use grid_derived_type,    only : grid_type
+    use function_holder_type, only : func_h_t
+    use rec_derived_type,     only : rec_t
+    use project_inputs,       only : n_dim, n_rec_vars, rec_degree, limit
+    type(grid_type),           intent(in)  :: grid
+    class(func_h_t),           intent(in)  :: eval_fun
+    type(rec_t),               intent(out) :: rec
+    call setup_reconstruction( grid, n_dim, n_rec_vars, rec_degree, rec, eval_fun=eval_fun, limit=limit )
+  end subroutine make_reconstruction
 
 end module test_problem
+! program main
+!   use set_precision, only : dp
+!   use project_inputs, only : job_name, out_quad_order, out_derivatives
+!   use timer_derived_type, only : basic_timer_t
+!   use namelist,       only : read_nml
+!   use test_problem,  only : make_eval_function, make_grid, make_reconstruction
+!   use grid_derived_type, only : grid_type
+!   use rec_derived_type, only : rec_t
+!   use function_holder_type, only : func_h_t
+!   implicit none
+!   type(grid_type) :: grid
+!   type(rec_t) :: rec
+!   class(func_h_t), allocatable :: eval_fun
+!   type(basic_timer_t) :: timer
+!   call timer%tic()
+!   call read_nml( )
+!   call make_eval_function( eval_fun)
+!   call make_grid( grid )
+!   call make_reconstruction( grid, eval_fun, rec )
+!   call rec%solve( grid,ext_fun=eval_fun,soln_name=job_name,output_quad_order=out_quad_order,output_derivatives=out_derivatives)
+!   call rec%destroy()
+!   call grid%destroy()
+  
+!   if ( allocated(eval_fun) ) then
+!     call eval_fun%destroy()
+!     deallocate(eval_fun)
+!   end if
+!   call deallocate_inputs()
+!   write(*,*) 'Elapsed time: ', timer%toc()
+! end program main
 
 program main
   use set_precision, only : dp
-  use set_constants, only : zero, one
-  use test_problem,  only : setup_grid, geom_space_wrapper
-  use test_problem,  only : setup_reconstruction1
-  use grid_derived_type, only : grid_type
-  use rec_derived_type, only : rec_t
-  use timer_derived_type, only : basic_timer_t
-  use function_holder_type, only : func_h_t
-  use cross_term_sinusoid,  only : cts_t
-  use cylinder_cone_bump,   only : ccb_t
-
+  use namelist,       only : read_nml
+  use project_inputs, only : n_dim, rec_degree, deallocate_inputs
+  use monomial_basis_derived_type, only : monomial_basis_t
   implicit none
-
-  type(grid_type) :: grid
-  type(rec_t) :: rec
-  class(func_h_t), allocatable :: eval_fun
-  type(basic_timer_t) :: timer
-  integer :: degree, n_vars, n_dim
-  integer, dimension(3) :: n_nodes, n_ghost, n_skip
-  logical :: old, limit
-  real(dp), dimension(:,:), allocatable :: space_scale, space_origin
-  integer :: i
-
-  degree  = 4
-  n_vars  = 1
-  n_dim   = 1
-  n_nodes = [33,1,1]
-  n_ghost = [0,0,0]
-  n_skip  = [1,1,1]
-  old = .false.
-  limit = .true.
-
-  allocate( space_scale(n_dim,n_vars) )
-  allocate( space_origin(n_dim,n_vars) )
-  space_origin(1:n_dim,:) = 0.0_dp
-  space_scale   = 2.0_dp
-  ! space_scale   = 0.02_dp
-  space_origin(1,:) = 0.25_dp
-  ! space_origin(2,:) = 0.5_dp
-  ! allocate( eval_fun, source=cts_t( n_dim, n_vars,     &
-  !                                   rand_coefs=.true., &
-  !                                   rand_seed=2,       &
-  !                                   space_scale=space_scale, &
-  !                                   space_origin=space_origin) )
-  allocate( eval_fun, source=ccb_t( n_dim, n_vars,     &
-                                    space_scale=space_scale, &
-                                    space_origin=space_origin) )
-  call setup_grid( n_dim, n_nodes, n_ghost, grid, delta=0.0_dp )!, x2_map=geom_space_wrapper )
-
-  call timer%tic()
-  call setup_reconstruction1( grid, n_dim, n_vars, degree, rec, eval_fun=eval_fun, limit=limit )
-  call rec%solve( grid,ext_fun=eval_fun,soln_name='test',output_quad_order=12,output_derivatives=.true.)
-  write(*,*) 'Elapsed time: ', timer%toc()
-  
-  call rec%destroy()
-  call grid%destroy()
-  call eval_fun%destroy()
-  if ( allocated(eval_fun) ) deallocate(eval_fun)
-  deallocate( space_scale, space_origin )
+  type(monomial_basis_t) :: p
+  call read_nml( )
+  p = monomial_basis_t( n_dim, rec_degree )
+  call p%check_gradient_indexing()
+  call p%destroy()
+  call deallocate_inputs()
 end program main
-
-! program main
-!   use index_conversion, only : logical_array_to_int
-
-!   implicit none
-!   logical, dimension(10) :: array
-!   integer :: i
-!   integer :: j, sz
-
-!   sz = 10
-
-!   array    = .false.
-!   array(1:10) = .true.
-
-!   call logical_array_to_int(array,i)
-
-!   write(*,*) array
-
-!   write(*,*) i
-
-!   write(*,*) i
-
-! end program main

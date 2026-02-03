@@ -4,3 +4,4 @@
 *.log
 *.gcda
 *.gcno
+*.nml.updated
