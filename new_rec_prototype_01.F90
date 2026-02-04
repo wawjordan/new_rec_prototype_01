@@ -1296,6 +1296,7 @@ module stencil_cell_derived_type
     integer, dimension(4)   :: idx      = 0
     integer, dimension(4,6) :: nbor_idx = 0
     logical, dimension(6)   :: free     = .false.
+    logical, dimension(6)   :: on_boundary = .false.
     integer                 :: degree   = 0
   contains
     procedure, public, pass :: create  => create_stencil_cell
@@ -1451,6 +1452,7 @@ contains
         this%free(i) = in_bound( 3, this%nbor_idx(2:4,i), bnd_min, bnd_max )
       end if
     end do
+    this%on_boundary = .not.this%free
 
   end subroutine create_stencil_cell
 
@@ -1504,7 +1506,7 @@ module stencil_growing_routines
 
   contains
 
-  pure subroutine grow_stencil_basic( block_id, idx, N_cells, sz_in, sz_out, nbor_block, nbor_idx, nbor_degree )
+  pure subroutine grow_stencil_basic( block_id, idx, N_cells, sz_in, sz_out, nbor_block, nbor_idx, nbor_degree, on_boundary )
     use stencil_cell_derived_type, only : block_info
     use index_conversion,          only : local2global_bnd
     use stencil_indexing,          only : sort_stencil_idx
@@ -1513,11 +1515,12 @@ module stencil_growing_routines
     integer,                              intent(in)  :: sz_in
     integer,                              intent(out) :: sz_out
     integer, dimension(6*sz_in),          intent(out) :: nbor_block, nbor_idx, nbor_degree
+    logical, dimension(6,6*sz_in), optional, intent(out) :: on_boundary
     type(block_info), dimension(1) :: bi
     integer, dimension(4,6*sz_in) :: idx_list
     integer :: i
     bi(1) = block_info(block_id,N_cells)
-    call grow_stencil_new_connected_block( block_id, idx, bi, sz_in, sz_out, idx_list, nbor_degree )
+    call grow_stencil_new_connected_block( block_id, idx, bi, sz_in, sz_out, idx_list, nbor_degree, on_boundary=on_boundary )
     call bi%destroy()
 
     nbor_block = 0
@@ -1541,7 +1544,7 @@ module stencil_growing_routines
     max_degree = maxval(stencil%degree)
   end function get_max_degree
 
-  pure subroutine grow_stencil_new_connected_block( block_id, idx, block_info_list, sz_in, sz_out, idx_list, degree )
+  pure subroutine grow_stencil_new_connected_block( block_id, idx, block_info_list, sz_in, sz_out, idx_list, degree, on_boundary )
     use stencil_indexing, only : sort_stencil_idx
     use stencil_cell_derived_type, only : block_info, stencil_cell_t
     integer,                              intent(in)  :: block_id
@@ -1551,6 +1554,7 @@ module stencil_growing_routines
     integer,                              intent(out) :: sz_out
     integer, dimension(4,6*sz_in),        intent(out) :: idx_list
     integer, dimension(6*sz_in),          intent(out) :: degree
+    logical, dimension(6,6*sz_in), optional, intent(out) :: on_boundary
     type(stencil_cell_t), dimension(6*sz_in) :: stencil
     integer :: i
     logical :: balanced
@@ -1558,14 +1562,18 @@ module stencil_growing_routines
     
     call build_stencil_connected_block( block_id, idx, sz_in, block_info_list, &
                                         sz_out, stencil, balanced=.true. )
-
-    
     idx_list = 0
     degree   = 0
     do i = 1,sz_out
-      idx_list(:,i) = stencil(i)%idx
-      degree(i)     = stencil(i)%degree
+      idx_list(:,i)    = stencil(i)%idx
+      degree(i)        = stencil(i)%degree
     end do
+    if (present(on_boundary)) then
+      on_boundary = .false.
+      do i = 1,sz_out
+        on_boundary(:,i) = stencil(i)%on_boundary
+      end do
+    end if
 
   end subroutine grow_stencil_new_connected_block
 
@@ -4417,7 +4425,7 @@ contains
     use set_constants, only : max_text_line_length
     use string_stuff, only : write_integer_tuple
     class(monomial_basis_t), intent(in)  :: this
-    integer :: d, term
+    integer :: d, term, a, b
     integer, dimension(this%n_dim) :: grad_idx
     character(max_text_line_length) :: tmp_string, out_string
     ! do d = this%total_degree-1,0,-1
@@ -4426,7 +4434,8 @@ contains
     write(*,*) this%idx
     do d = this%total_degree-1,1,-1
       ! for each term with this total degree:
-      do term = this%idx(d-1),this%idx(d)-1
+      ! do term = this%idx(d-1)+1,this%idx(d-1) + 1 + (this%idx(d)-this%idx(d-1)-1)
+      do term = this%idx(d-1)+1,this%idx(d)
         grad_idx = this%diff_idx(:,term) ! indices to extract gradient information
         out_string=''
         call write_integer_tuple([d,term],tmp_string)
@@ -4438,6 +4447,18 @@ contains
         write(*,'(A)') trim(out_string)
       end do
     end do
+    term = 1
+    grad_idx = this%diff_idx(:,term) ! indices to extract gradient information
+    out_string=''
+    call write_integer_tuple([d,term],tmp_string)
+    write(out_string,'(A,A)') trim(out_string),trim(tmp_string)//' : '
+    call write_integer_tuple(this%exponents(:,term),tmp_string)
+    write(out_string,'(A,A)') trim(out_string),'['//trim(tmp_string)//'] : '
+    call write_integer_tuple(grad_idx,tmp_string)
+    write(out_string,'(A,A)') trim(out_string),'('//trim(tmp_string)//')'
+    write(*,'(A)') trim(out_string)
+
+    ! constant term
   end subroutine check_gradient_indexing
 
 end module monomial_basis_derived_type
@@ -4923,7 +4944,7 @@ module zero_mean_basis_derived_type
     procedure, public, pass :: eval  => evaluate_basis
     procedure, public, pass :: deval => evaluate_basis_derivative
     procedure, public, pass :: rec_eval => evaluate_reconstruction
-    ! procedure, public, pass :: drec_eval => evaluate_reconstruction_derivative
+    procedure, public, pass :: drec_eval => evaluate_reconstruction_derivative
     procedure, public, pass :: scaled_basis_derivative, scaled_weighted_basis_derivative
     procedure, public, pass :: scaled_basis_derivatives
     procedure, public, pass :: transform_coefs
@@ -5265,26 +5286,26 @@ pure function evaluate_reconstruction( this, p, point, coefs, n_terms, n_var, va
     end do
   end function evaluate_reconstruction
 
-!   pure function evaluate_reconstruction_derivative( this, p, point, coefs, n_terms, n_var, var_idx, order ) result(val)
-!     use set_constants, only : zero
-!     class(zero_mean_basis_t),   intent(in) :: this
-!     type(monomial_basis_t),     intent(in) :: p
-!     real(dp), dimension(:),     intent(in) :: point
-!     real(dp), dimension(:,:),   intent(in) :: coefs
-!     integer,                    intent(in) :: n_terms, n_var
-!     integer,  dimension(n_var), intent(in) :: var_idx
-!     integer,  dimension(:),     intent(in) :: order
-!     real(dp), dimension(n_var)             :: val
-!     real(dp), dimension(n_terms) :: basis
-!     integer :: v, n
-!     val = zero
-!     do n = 1,n_terms
-!       basis(n) = this%deval(p,n,point,order)
-!     end do
-!     do v = 1,n_var
-!       val(v) = val(v) + dot_product( coefs(1:n_terms,var_idx(v)), basis )
-!     end do
-!   end function evaluate_reconstruction_derivative
+  pure function evaluate_reconstruction_derivative( this, p, point, coefs, n_terms, n_var, var_idx, order ) result(val)
+    use set_constants, only : zero
+    class(zero_mean_basis_t),   intent(in) :: this
+    type(monomial_basis_t),     intent(in) :: p
+    real(dp), dimension(:),     intent(in) :: point
+    real(dp), dimension(:,:),   intent(in) :: coefs
+    integer,                    intent(in) :: n_terms, n_var
+    integer,  dimension(n_var), intent(in) :: var_idx
+    integer,  dimension(:),     intent(in) :: order
+    real(dp), dimension(n_var)             :: val
+    real(dp), dimension(n_terms) :: basis
+    integer :: v, n
+    val = zero
+    do n = 1,n_terms
+      basis(n) = this%deval(p,n,point,order)
+    end do
+    do v = 1,n_var
+      val(v) = val(v) + dot_product( coefs(1:n_terms,var_idx(v)), basis )
+    end do
+  end function evaluate_reconstruction_derivative
 
 end module zero_mean_basis_derived_type
 
@@ -5304,7 +5325,7 @@ module zero_mean_limiter_type
   contains
     private
     procedure, public, pass :: destroy => destroy_limiter
-    procedure, public, pass :: update_min_max
+    procedure, public, pass :: update_min_max, update_min_max_point
     procedure, public, pass :: update_limiter => update_alpha
   end type zero_mean_limit_t
   interface zero_mean_limit_t
@@ -5365,6 +5386,31 @@ contains
       end do
     end do
   end subroutine update_min_max
+
+  pure subroutine update_min_max_point( this, p, basis, coefs, point )
+    class(zero_mean_limit_t), intent(inout) :: this
+    class(monomial_basis_t),  intent(in)    :: p
+    class(zero_mean_basis_t), intent(in)    :: basis
+    real(dp), dimension(:,:), intent(in)    :: coefs
+    real(dp), dimension(p%n_dim), intent(in) :: point
+    real(dp), dimension(this%n_vars) :: val
+    integer :: v, d, term
+    val = basis%rec_eval(p,point,coefs,p%n_terms,this%n_vars,this%var_idx)
+    ! loop over all variables
+    do v = 1,this%n_vars
+      this%v_min(0,v) = min( this%v_min(0,v), val(v) )
+      this%v_max(0,v) = max( this%v_max(0,v), val(v) )
+    end do
+    do d = 1,p%total_degree ! (grouped by total degree)
+      do term = p%idx(d-1)+1,p%idx(d)
+        val = basis%drec_eval(p,point,coefs,p%n_terms,this%n_vars,this%var_idx,p%exponents(:,term))
+        do v = 1,this%n_vars
+          this%v_min(d,v) = min( this%v_min(d,v), val(v) )
+          this%v_max(d,v) = max( this%v_max(d,v), val(v) )
+        end do
+      end do
+    end do
+  end subroutine update_min_max_point
 
   pure function get_alpha_val_1(n_dim,grad,dx,u_c,u_min,u_max) result(alpha)
     use set_constants, only : near_zero, one
@@ -5427,53 +5473,62 @@ contains
     real(dp), dimension(p%n_terms,this%n_vars) :: tcoefs
     integer, dimension(p%n_dim) :: grad_idx
     real(dp), dimension(p%n_dim) :: grad, dx
-    real(dp) :: alpha, u_unlimited, u_limited, diff
+    real(dp) :: alpha, u_min, u_max, u_c, u_unlimited, u_limited, diff
     real(dp), parameter :: tol = 0.01_dp
     integer :: v, d, term
     ! transform coefficients to get derivatives at reference point
     tcoefs = basis%transform_coefs(p,coefs,p%n_terms,this%n_vars,this%var_idx)
     dx = point(1:p%n_dim) - basis%x_ref ! x_i - x_c
     do v = 1,this%n_vars
-      ! start at the highest degree (-1)
-      do d = p%total_degree-1,0,-1
-
-        ! for each term with this total degree:
-        do term = p%idx(d),p%idx(d+1)-1
+      ! higher order terms
+      do d = p%total_degree-1,1,-1
+        do term = p%idx(d-1)+1,p%idx(d) ! for each term with this total degree:
           grad_idx = p%diff_idx(:,term) ! indices to extract gradient information
           grad = tcoefs(grad_idx,v)
-          ! add contributions from higher-order terms
-          ! do d2 = p%total_degree,d,-1
-          !   do term2 = p
-          !   grad = grad + 
-          ! end do
           alpha = zero
-          associate( u_c   => tcoefs(term,v),  &
-                     u_min => this%v_min(d,v), &
-                     u_max => this%v_max(d,v) )
-            u_unlimited = linear_reconstruction(p%n_dim,u_c,grad,dx)
-            alpha = get_alpha_val(p%n_dim,grad,dx,u_c,u_min,u_max)
-            this%alpha(d+1,v) = min( this%alpha(d+1,v), alpha )
-            u_limited = linear_reconstruction(p%n_dim,u_c,this%alpha(d+1,v)*grad,dx)
-            if ( ( u_limited > u_max ).or.(u_limited < u_min ) ) then
-              diff = u_unlimited - u_limited
-            end if
-            if ( abs(one-alpha)>tol .and. abs(alpha)>tol ) then
-              diff = u_unlimited - u_limited
-            end if
-            ! this%alpha(d,v) = min( this%alpha(d,v), get_alpha_val(p%n_dim,grad,dx,u_c,u_min,u_max) )
-          end associate
+          u_c   = tcoefs(term,v)
+          u_min = this%v_min(d,v)
+          u_max = this%v_max(d,v)
+          u_unlimited = linear_reconstruction(p%n_dim,u_c,grad,dx)
+          alpha = get_alpha_val(p%n_dim,grad,dx,u_c,u_min,u_max)
+          this%alpha(d+1,v) = min( this%alpha(d+1,v), alpha )
+          u_limited = linear_reconstruction(p%n_dim,u_c,this%alpha(d+1,v)*grad,dx)
+          if ( ( u_limited > u_max ).or.(u_limited < u_min ) ) then
+            diff = u_unlimited - u_limited
+          end if
+          if ( abs(one-alpha)>tol .and. abs(alpha)>tol ) then
+            diff = u_unlimited - u_limited
+          end if
+          ! this%alpha(d,v) = min( this%alpha(d,v), get_alpha_val(p%n_dim,grad,dx,u_c,u_min,u_max) )
         end do
-
-        
-
         ! as soon as alpha_e^(q)=1 is encountered, no further limiting is required
         ! if ( abs(this%alpha(d+1,v) - one )< near_zero ) exit
       end do
 
-      ! do d = p%total_degree-1,0,-1
-      !   ! alpha_e^(p) := max_{p<=q} alpha_e^(q), p>=1
-      !   this%alpha(d+1,v) = maxval(this%alpha(d+1:p%total_degree,v))
-      ! end do
+      ! regular linear limiting
+      d = 0
+      term = 1
+      grad_idx = p%diff_idx(:,term) ! indices to extract gradient information
+      grad = tcoefs(grad_idx,v)
+      alpha = zero
+      u_c   = tcoefs(term,v)
+      u_min = this%v_min(d,v)
+      u_max = this%v_max(d,v)
+      u_unlimited = linear_reconstruction(p%n_dim,u_c,grad,dx)
+      alpha = get_alpha_val(p%n_dim,grad,dx,u_c,u_min,u_max)
+      this%alpha(d+1,v) = min( this%alpha(d+1,v), alpha )
+      u_limited = linear_reconstruction(p%n_dim,u_c,this%alpha(d+1,v)*grad,dx)
+      if ( ( u_limited > u_max ).or.(u_limited < u_min ) ) then
+        diff = u_unlimited - u_limited
+      end if
+      if ( abs(one-alpha)>tol .and. abs(alpha)>tol ) then
+        diff = u_unlimited - u_limited
+      end if
+
+      do d = p%total_degree-1,0,-1
+        ! alpha_e^(p) := max_{p<=q} alpha_e^(q), p>=1
+        this%alpha(d+1,v) = maxval(this%alpha(d+1:p%total_degree,v))
+      end do
 
       ! first derivatives
       ! this%alpha(1,v) = max(this%alpha(1,v),this%alpha(2,v))
@@ -5501,8 +5556,8 @@ module reconstruct_cell_derived_type
     integer :: n_vars
     integer :: self_idx
     integer :: self_block
-    integer :: n_nbor
-    integer, dimension(:), allocatable :: nbor_block, nbor_idx, nbor_degree
+    integer :: n_nbor, n_bnd
+    integer, dimension(:), allocatable :: nbor_block, nbor_idx, nbor_degree, bnd_idx
   contains
     private
     procedure, public, pass :: destroy => destroy_cell_rec
@@ -5523,6 +5578,7 @@ contains
     if ( allocated(this%nbor_block ) ) deallocate( this%nbor_block )
     if ( allocated(this%nbor_idx   ) ) deallocate( this%nbor_idx   )
     if ( allocated(this%nbor_degree) ) deallocate( this%nbor_degree)
+    if ( allocated(this%bnd_idx    ) ) deallocate( this%bnd_idx    )
     if ( allocated(this%coefs      ) ) deallocate( this%coefs      )
     if ( allocated(this%Ainv       ) ) deallocate( this%Ainv       )
     if ( allocated(this%col_scale  ) ) deallocate( this%col_scale  )
@@ -5530,14 +5586,15 @@ contains
     this%self_idx   = 0
     this%self_block = 0
     this%n_nbor     = 0
+    this%n_bnd      = 0
   end subroutine destroy_cell_rec
 
-  pure function constructor( p, self_block, self_idx, n_nbor, nbor_block, nbor_idx, nbor_degree, n_vars, quad, h_ref ) result(this)
+  pure function constructor( p, self_block, self_idx, n_nbor, n_bnd, nbor_block, nbor_idx, nbor_degree, bnd_idx, n_vars, quad, h_ref ) result(this)
     use set_constants, only : zero,one
     use quadrature_derived_type, only : quad_t
     type(monomial_basis_t), intent(in)    :: p
-    integer,                intent(in)    :: self_block, self_idx, n_nbor
-    integer, dimension(:),  intent(in)    :: nbor_block, nbor_idx, nbor_degree
+    integer,                intent(in)    :: self_block, self_idx, n_nbor, n_bnd
+    integer, dimension(:),  intent(in)    :: nbor_block, nbor_idx, nbor_degree, bnd_idx
     integer,                intent(in)    :: n_vars
     type(quad_t),           intent(in)    :: quad
     real(dp), dimension(:), intent(in)    :: h_ref
@@ -5548,18 +5605,21 @@ contains
     this%self_idx   = self_idx
     this%self_block = self_block
     this%n_nbor     = n_nbor
+    this%n_bnd      = n_bnd
     allocate( this%nbor_block(  n_nbor ) )
     allocate( this%nbor_idx(    n_nbor ) )
     allocate( this%nbor_degree( n_nbor ) )
+    allocate( this%bnd_idx( n_bnd ) )
     allocate( this%coefs( p%n_terms, n_vars ) )
     allocate( this%Ainv(  p%n_terms-1, n_nbor ) )
     allocate( this%col_scale( p%n_terms-1     ) )
     this%nbor_block  = nbor_block(1:n_nbor)
     this%nbor_idx    = nbor_idx(1:n_nbor)
     this%nbor_degree = nbor_degree(1:n_nbor)
+    this%bnd_idx     = bnd_idx(1:n_bnd)
     this%coefs       = zero
-    this%Ainv      = zero
-    this%col_scale = one
+    this%Ainv        = zero
+    this%col_scale   = one
   end function constructor
 
   pure function evaluate_reconstruction( this, p, point, n_terms,              &
@@ -5798,10 +5858,9 @@ contains
     integer,  dimension(3)     :: idx_tmp, lo, hi
     real(dp), dimension(n_dim) :: h_ref
     integer :: i, n_interior, n_cell_nodes
-    integer :: min_sz, max_sz, n_nbors, max_degree
+    integer :: min_sz, max_sz, n_nbors, max_degree, n_bnd
+    integer, dimension(6) :: bnd_idx
     integer, dimension(:), allocatable :: nbor_block, nbor_idx, nbor_degree
-    logical, dimension(:), allocatable :: mask_
-
     call this%destroy()
     allocate( this%n_cells( n_dim ) )
     this%n_skip         = n_skip
@@ -5814,8 +5873,6 @@ contains
     this%p = monomial_basis_t( this%degree, this%n_dim )
     allocate( this%cells(this%n_cells_total) )
 
-    allocate( mask_(this%n_cells_total) )
-
     min_sz = (3 * this%p%n_terms)/2
     max_sz = 6*min_sz
     allocate( nbor_block(max_sz), nbor_idx(max_sz), nbor_degree(max_sz) )
@@ -5827,7 +5884,7 @@ contains
     do i = 1,this%n_cells_total
       idx_tmp(1:this%n_dim) = global2local_bnd( i, lo(1:this%n_dim), hi(1:this%n_dim) )
       h_ref = this%get_cell_h_ref( grid%gblock(block_num), idx_tmp )
-      call this%get_nbors( grid, block_num, i, min_sz, n_nbors, nbor_block, nbor_idx, nbor_degree )
+      call this%get_nbors( grid, block_num, i, min_sz, n_nbors, nbor_block, nbor_idx, nbor_degree, n_bnd, bnd_idx )
       associate( quad => grid%gblock(block_num)%grid_vars%quad( idx_tmp(1),    &
                                                                 idx_tmp(2),    &
                                                                 idx_tmp(3) ) )
@@ -5835,9 +5892,11 @@ contains
                                     block_num,                             &
                                     i,                                     &
                                     n_nbors,                               &
+                                    n_bnd,                                 &
                                     nbor_block,                            &
                                     nbor_idx,                              &
                                     nbor_degree,                           &
+                                    bnd_idx,                               &
                                     n_var,                                 &
                                     quad,                                  &
                                     h_ref )
@@ -6000,7 +6059,7 @@ contains
     end do
   end function determine_maximum_degree
 
-  pure subroutine get_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, nbor_block, nbor_idx, degree )
+  pure subroutine get_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, nbor_block, nbor_idx, degree, n_bnd, bnd_idx )
     use index_conversion,  only : global2local_bnd, local2global_bnd
     use stencil_growing_routines, only : grow_stencil_basic
     use grid_derived_type, only : grid_type
@@ -6009,14 +6068,24 @@ contains
     integer,                intent(in)  :: blk, lin_idx, min_sz
     integer,                intent(out) :: n_nbors
     integer, dimension(6*min_sz), intent(out) :: nbor_block, nbor_idx, degree
+    integer,                intent(out) :: n_bnd
+    integer, dimension(6),  intent(out) :: bnd_idx
     integer, dimension(6*min_sz) :: tmp
+    integer :: i
+    logical, dimension(6,6*min_sz) :: on_boundary
     integer, dimension(3) :: idx_tmp, lo, hi
     lo = 1
     hi = 1
     hi(1:this%n_dim) = this%n_cells
     idx_tmp = 1
     idx_tmp(1:this%n_dim) = global2local_bnd( lin_idx, lo(1:this%n_dim), hi(1:this%n_dim) )
-    call grow_stencil_basic( blk, idx_tmp, hi, min_sz, n_nbors, nbor_block, nbor_idx, degree )
+    call grow_stencil_basic( blk, idx_tmp, hi, min_sz, n_nbors, nbor_block, nbor_idx, degree, on_boundary=on_boundary )
+
+    !
+    n_bnd   = count(on_boundary(1:2*this%p%n_dim,1))
+    bnd_idx = 0
+    bnd_idx(1:n_bnd) = pack( [(i,i=1,2*this%p%n_dim)],on_boundary(1:2*this%p%n_dim,1))
+
 
     ! don't include the central cell
     tmp = nbor_block
@@ -6187,22 +6256,13 @@ contains
     integer :: n_face_nbors, n_cell_nodes
     real(dp), dimension(3,product(rblock%n_skip+1)) :: nodes
     
+    n_cell_nodes = product(rblock%n_skip+1)
+
     ! first get the min-max values for coefficients
     do i = 1,this%n_cells_total
       this%lim(i)%v_max = -large
       this%lim(i)%v_min =  large
       this%lim(i)%alpha = one
-      ! if ( i == 4160 ) then
-      !   n_interior = rblock%cells(i)%n_interior
-      !   allocate( debug_nbor_idx(3,n_interior+1) )
-      !   debug_nbor_idx(:,1) = global2local(i,gblock%n_cells)
-      !   do n = 1,n_interior
-      !     j = rblock%cells(i)%nbor_idx(n)
-      !     debug_nbor_idx(:,n+1) = global2local(j,gblock%n_cells)
-      !   end do
-      !   debug_nbor_idx = -1
-      !   deallocate( debug_nbor_idx )
-      ! end if
       call this%lim(i)%update_min_max(rblock%p,rblock%cells(i)%basis,rblock%cells(i)%coefs)
       face_nbors = 0
       n_face_nbors = count( rblock%cells(i)%nbor_degree==1 )
@@ -6212,28 +6272,18 @@ contains
         j = face_nbors(n)
         call this%lim(i)%update_min_max(rblock%p,rblock%cells(j)%basis,rblock%cells(j)%coefs)
       end do
+      if ( rblock%cells(i)%n_bnd > 0 ) then
+        nodes = pack_cell_node_coords( global2local(i,gblock%n_cells), [1,1,1], gblock%n_nodes, rblock%n_skip, gblock%node_coords )
+        do n = 1,n_cell_nodes
+          call this%lim(i)%update_min_max_point(rblock%p,rblock%cells(j)%basis,rblock%cells(j)%coefs,nodes(:,n))
+        end do
+        ! do n = 1,rblock%cells(i)%n_bnd
+          ! need face to vertex mapping
+          ! loop over appropriate vertices
+        ! end do
+      end if
     end do
-
-    ! now calculate limiter values
-    ! do i = 1,this%n_cells_total
-    !   idx = global2local(i,gblock%n_cells)
-    !   associate( quad => gblock%grid_vars%quad(idx(1),idx(2),idx(3)) )
-    !   do n = 1,quad%n_quad
-    !     call this%lim(i)%update_limiter(rblock%p,rblock%cells(i)%basis,quad%quad_pts(:,n),rblock%cells(i)%coefs)
-    !   end do
-    !   end associate
-    ! end do
-
-
     
-
-    ! allocate( nodes(3,n_cell_nodes) )
-    ! lo = [1,1,1]
-    ! hi = gblock%n_nodes
-    ! nodes = pack_cell_node_coords( idx, lo, hi, this%n_skip, gblock%node_coords )
-
-    n_cell_nodes = product(rblock%n_skip+1)
-
     do i = 1,this%n_cells_total
       idx = global2local(i,gblock%n_cells)
       nodes = pack_cell_node_coords( global2local(i,gblock%n_cells), [1,1,1], gblock%n_nodes, rblock%n_skip, gblock%node_coords )
@@ -6984,47 +7034,48 @@ contains
   end subroutine make_reconstruction
 
 end module test_problem
-! program main
-!   use set_precision, only : dp
-!   use project_inputs, only : job_name, out_quad_order, out_derivatives
-!   use timer_derived_type, only : basic_timer_t
-!   use namelist,       only : read_nml
-!   use test_problem,  only : make_eval_function, make_grid, make_reconstruction
-!   use grid_derived_type, only : grid_type
-!   use rec_derived_type, only : rec_t
-!   use function_holder_type, only : func_h_t
-!   implicit none
-!   type(grid_type) :: grid
-!   type(rec_t) :: rec
-!   class(func_h_t), allocatable :: eval_fun
-!   type(basic_timer_t) :: timer
-!   call timer%tic()
-!   call read_nml( )
-!   call make_eval_function( eval_fun)
-!   call make_grid( grid )
-!   call make_reconstruction( grid, eval_fun, rec )
-!   call rec%solve( grid,ext_fun=eval_fun,soln_name=job_name,output_quad_order=out_quad_order,output_derivatives=out_derivatives)
-!   call rec%destroy()
-!   call grid%destroy()
-  
-!   if ( allocated(eval_fun) ) then
-!     call eval_fun%destroy()
-!     deallocate(eval_fun)
-!   end if
-!   call deallocate_inputs()
-!   write(*,*) 'Elapsed time: ', timer%toc()
-! end program main
 
 program main
   use set_precision, only : dp
+  use project_inputs, only : job_name, out_quad_order, out_derivatives, deallocate_inputs
+  use timer_derived_type, only : basic_timer_t
   use namelist,       only : read_nml
-  use project_inputs, only : n_dim, rec_degree, deallocate_inputs
-  use monomial_basis_derived_type, only : monomial_basis_t
+  use test_problem,  only : make_eval_function, make_grid, make_reconstruction
+  use grid_derived_type, only : grid_type
+  use rec_derived_type, only : rec_t
+  use function_holder_type, only : func_h_t
   implicit none
-  type(monomial_basis_t) :: p
+  type(grid_type) :: grid
+  type(rec_t) :: rec
+  class(func_h_t), allocatable :: eval_fun
+  type(basic_timer_t) :: timer
+  call timer%tic()
   call read_nml( )
-  p = monomial_basis_t( n_dim, rec_degree )
-  call p%check_gradient_indexing()
-  call p%destroy()
+  call make_eval_function( eval_fun)
+  call make_grid( grid )
+  call make_reconstruction( grid, eval_fun, rec )
+  call rec%solve( grid,ext_fun=eval_fun,soln_name=job_name,output_quad_order=out_quad_order,output_derivatives=out_derivatives)
+  call rec%destroy()
+  call grid%destroy()
+  
+  if ( allocated(eval_fun) ) then
+    call eval_fun%destroy()
+    deallocate(eval_fun)
+  end if
   call deallocate_inputs()
+  write(*,*) 'Elapsed time: ', timer%toc()
 end program main
+
+! program main
+!   use set_precision, only : dp
+!   use namelist,       only : read_nml
+!   use project_inputs, only : n_dim, rec_degree, deallocate_inputs
+!   use monomial_basis_derived_type, only : monomial_basis_t
+!   implicit none
+!   type(monomial_basis_t) :: p
+!   call read_nml( )
+!   p = monomial_basis_t( rec_degree, n_dim )
+!   call p%check_gradient_indexing()
+!   call p%destroy()
+!   call deallocate_inputs()
+! end program main
