@@ -4539,6 +4539,7 @@ end module monomial_basis_derived_type
 
 module function_holder_type
   use set_precision, only : dp
+  use set_constants, only : zero
   implicit none
   private
   public :: func_h_t
@@ -4549,8 +4550,18 @@ module function_holder_type
   contains
     procedure :: initialize_super
     procedure, pass :: test_eval
-    procedure(eval_i),    public, deferred :: eval
-    procedure(destroy_i), public, deferred :: destroy
+    procedure, pass :: dx_eval   => not_implemented_dx_eval
+    procedure, pass :: dt_eval   => not_implemented_dt_eval
+    procedure, pass :: dtx_eval  => not_implemented_dtx_eval
+    procedure, pass :: grad_eval => not_implemented_grad_eval
+    procedure, pass :: hess_eval => not_implemented_hess_eval
+    procedure(eval_i),      public, deferred :: eval
+    ! procedure(dx_eval_i),   public, deferred :: dx_eval
+    ! procedure(dt_eval_i),   public, deferred :: dt_eval
+    ! procedure(dtx_eval_i),  public, deferred :: dtx_eval
+    ! procedure(grad_eval_i), public, deferred :: grad_eval
+    ! procedure(hess_eval_i), public, deferred :: hess_eval
+    procedure(destroy_i),   public, deferred :: destroy
   end type func_h_t
 
   abstract interface
@@ -4562,6 +4573,54 @@ module function_holder_type
       real(dp), optional,     intent(in) :: t
       real(dp), dimension(this%n_eq)     :: q
     end function eval_i
+
+    ! pure function dx_eval_i( this, x, t, order ) result(dqdx)
+    !   use set_precision,  only : dp
+    !   import func_h_t
+    !   class(func_h_t),                          intent(in) :: this
+    !   real(dp), dimension(:),                   intent(in) :: x
+    !   real(dp),                       optional, intent(in) :: t
+    !   integer, dimension(this%n_dim), optional, intent(in) :: order
+    !   real(dp), dimension(this%n_eq)                       :: dqdx
+    ! end function dx_eval_i
+
+    ! pure function dt_eval_i( this, x, t ) result(dqdt)
+    !   use set_precision,  only : dp
+    !   import func_h_t
+    !   class(func_h_t),                          intent(in) :: this
+    !   real(dp), dimension(:),                   intent(in) :: x
+    !   real(dp),                       optional, intent(in) :: t
+    !   real(dp), dimension(this%n_eq)                       :: dqdt
+    ! end function dt_eval_i
+
+    ! pure function dtx_eval_i( this, x, t, order, t_order ) result(dqdtdx)
+    !   use set_precision,  only : dp
+    !   import func_h_t
+    !   class(func_h_t),                          intent(in) :: this
+    !   real(dp), dimension(:),                   intent(in) :: x
+    !   real(dp),                       optional, intent(in) :: t
+    !   integer, dimension(this%n_dim), optional, intent(in) :: order
+    !   integer,                        optional, intent(in) :: t_order
+    !   real(dp), dimension(this%n_eq)                       :: dqdtdx
+    ! end function dtx_eval_i
+
+    ! pure function grad_eval_i( this, x, t ) result(gradq)
+    !   use set_precision,  only : dp
+    !   import func_h_t
+    !   class(func_h_t),                          intent(in) :: this
+    !   real(dp), dimension(:),                   intent(in) :: x
+    !   real(dp),                       optional, intent(in) :: t
+    !   real(dp), dimension(this%n_dim,this%n_eq)            :: gradq
+    ! end function grad_eval_i
+
+    ! pure function hess_eval_i( this, x, t ) result(hessq)
+    !   use set_precision,  only : dp
+    !   import func_h_t
+    !   class(func_h_t),                          intent(in) :: this
+    !   real(dp), dimension(:),                   intent(in) :: x
+    !   real(dp),                       optional, intent(in) :: t
+    !   real(dp), dimension(this%n_dim,this%n_dim,this%n_eq) :: hessq
+    ! end function hess_eval_i
 
     pure elemental subroutine destroy_i(this)
       import func_h_t
@@ -4578,7 +4637,6 @@ contains
   end subroutine initialize_super
 
   pure function test_eval( this, n_dim, n_var, x ) result(val)
-    use set_constants, only : zero
     class(func_h_t),        intent(in) :: this
     integer,                intent(in) :: n_dim, n_var
     real(dp), dimension(:), intent(in) :: x
@@ -4593,18 +4651,65 @@ contains
     end do
   end function test_eval
 
+  pure function not_implemented_dx_eval( this, x, t, order ) result(dqdx)
+    class(func_h_t),                          intent(in) :: this
+    real(dp), dimension(:),                   intent(in) :: x
+    real(dp),                       optional, intent(in) :: t
+    integer, dimension(this%n_dim), optional, intent(in) :: order
+    real(dp), dimension(this%n_eq)                       :: dqdx
+    dqdx = zero
+  end function not_implemented_dx_eval
+
+  pure function not_implemented_dt_eval( this, x, t ) result(dqdt)
+    class(func_h_t),                          intent(in) :: this
+    real(dp), dimension(:),                   intent(in) :: x
+    real(dp),                       optional, intent(in) :: t
+    real(dp), dimension(this%n_eq)                       :: dqdt
+    dqdt = zero
+  end function not_implemented_dt_eval
+
+  pure function not_implemented_dtx_eval( this, x, t, order, t_order ) result(dqdtdx)
+    class(func_h_t),                          intent(in) :: this
+    real(dp), dimension(:),                   intent(in) :: x
+    real(dp),                       optional, intent(in) :: t
+    integer, dimension(this%n_dim), optional, intent(in) :: order
+    integer,                        optional, intent(in) :: t_order
+    real(dp), dimension(this%n_eq)                       :: dqdtdx
+    dqdtdx = zero
+  end function not_implemented_dtx_eval
+
+  pure function not_implemented_grad_eval( this, x, t ) result(gradq)
+    class(func_h_t),                          intent(in) :: this
+    real(dp), dimension(:),                   intent(in) :: x
+    real(dp),                       optional, intent(in) :: t
+    real(dp), dimension(this%n_dim,this%n_eq)            :: gradq
+    gradq = zero
+  end function not_implemented_grad_eval
+
+  pure function not_implemented_hess_eval( this, x, t ) result(hessq)
+    class(func_h_t),                          intent(in) :: this
+    real(dp), dimension(:),                   intent(in) :: x
+    real(dp),                       optional, intent(in) :: t
+    real(dp), dimension(this%n_dim,this%n_dim,this%n_eq) :: hessq
+    hessq = zero
+  end function not_implemented_hess_eval
+
 end module function_holder_type
 
 module test_function_1
   use function_holder_type, only : func_h_t
+  use set_precision,        only : dp
   implicit none
   private
   public :: test_fun1_t
 
+  real(dp), dimension(3), parameter :: coefs = [999.0_dp, 888.0_dp, 777.0_dp]
+
   type, extends(func_h_t) :: test_fun1_t
   contains
     procedure :: eval    => eval_test_fun1
-    procedure :: destroy => destroy_test_fun1
+    procedure :: destroy   => destroy_test_fun1
+    procedure :: grad_eval => grad_eval_test_fun1
   end type test_fun1_t
 
   interface test_fun1_t
@@ -4624,28 +4729,40 @@ contains
   end subroutine destroy_test_fun1
 
   pure function eval_test_fun1( this, x, t ) result(q)
-    use set_precision, only : dp
     class(test_fun1_t),        intent(in) :: this
     real(dp), dimension(:), intent(in) :: x
     real(dp), optional,     intent(in) :: t
     real(dp), dimension(this%n_eq)     :: q
-    real(dp), dimension(3), parameter :: coefs = [999.0_dp, 888.0_dp, 777.0_dp]
+    
     ! q = 999.0_dp * x(1) - 888.0_dp * x(2) + 777.0_dp * x(3) - 666.0_dp
     q = dot_product(x,coefs(1:size(x))) - 666.0_dp
   end function eval_test_fun1
+
+  pure function grad_eval_test_fun1( this, x, t ) result(gradq)
+    class(test_fun1_t),        intent(in) :: this
+    real(dp), dimension(:),                   intent(in) :: x
+    real(dp),                       optional, intent(in) :: t
+    real(dp), dimension(this%n_dim,this%n_eq)            :: gradq
+    integer :: i
+    do i = 1,this%n_eq
+      gradq(:,i) = coefs(1:size(x))
+    end do
+  end function grad_eval_test_fun1
 
 end module test_function_1
 
 module test_function_2
   use function_holder_type, only : func_h_t
+  use set_precision,        only : dp
   implicit none
   private
   public :: test_fun2_t
 
   type, extends(func_h_t) :: test_fun2_t
   contains
-    procedure :: eval    => eval_test_fun2
-    procedure :: destroy => destroy_test_fun2
+    procedure :: eval      => eval_test_fun2
+    procedure :: destroy   => destroy_test_fun2
+    procedure :: grad_eval => grad_eval_test_fun2
   end type test_fun2_t
 
   interface test_fun2_t
@@ -4665,7 +4782,6 @@ contains
   end subroutine destroy_test_fun2
 
   pure function eval_test_fun2( this, x, t ) result(q)
-    use set_precision, only : dp
     use set_constants, only : pi
     class(test_fun2_t),        intent(in) :: this
     real(dp), dimension(:), intent(in) :: x
@@ -4678,6 +4794,30 @@ contains
       q = q*sin(pi*x(i))
     end do
   end function eval_test_fun2
+
+  pure function grad_eval_test_fun2( this, x, t ) result(gradq)
+    use set_constants, only : pi
+    class(test_fun2_t),        intent(in) :: this
+    real(dp), dimension(:),                   intent(in) :: x
+    real(dp),                       optional, intent(in) :: t
+    real(dp), dimension(this%n_dim,this%n_eq)            :: gradq
+    integer :: n, i
+    real(dp), dimension(this%n_dim) :: tmpq
+
+    do n = 1,this%n_dim
+      tmpq(n) = pi*cos(pi*x(n))
+      do i = 1,n-1
+        tmpq(n) = tmpq(n)*sin(pi*x(i))
+      end do
+      do i = n+1,this%n_dim
+        tmpq(n) = tmpq(n)*sin(pi*x(i))
+      end do
+    end do
+
+    do i = 1,this%n_eq
+      gradq(:,i) = tmpq
+    end do
+  end function grad_eval_test_fun2
 
 end module test_function_2
 
@@ -5581,6 +5721,7 @@ contains
       alpha_tmp = (u_min - u_c)/diff
       alpha = min(one,alpha_tmp)
     end if
+    diff = u_i - u_c
   end function get_alpha_val_new
 
   pure function apply_alpha_to_coefs(p,coefs_in,alpha_in) result(coefs_out)
@@ -5766,7 +5907,7 @@ contains
           u_tmp = basis%drec_eval(p,point,coefs_tmp,p%n_terms,1,[1],p%exponents(:,term))
           u_inter  = u_tmp(1)
 
-          alpha2 = max(get_alpha_val_new(u_inter,u_c2,u_min,u_max),zero)
+          alpha2 = get_alpha_val_new(u_inter,u_c2,u_min,u_max)
 
           this%alpha(d+1,v) = min( this%alpha(d+1,v), alpha2 )
 
@@ -5824,7 +5965,7 @@ contains
       u_tmp = basis%drec_eval(p,point,coefs_tmp,p%n_terms,1,[1],p%exponents(:,term))
       u_inter  = u_tmp(1)
 
-      alpha2 = max(get_alpha_val_new(u_inter,u_c2,u_min,u_max),zero)
+      alpha2 = get_alpha_val_new(u_inter,u_c2,u_min,u_max)
 
       this%alpha(d+1,v) = min( this%alpha(d+1,v), alpha2 )
 
@@ -6024,7 +6165,7 @@ contains
     class(func_h_t),        intent(in) :: eval_fun
     real(dp), dimension(n_var)         :: avg
     real(dp), dimension(n_var,quad%n_quad) :: tmp_val
-    integer :: n
+    integer :: n, i
     tmp_val = zero
     do n = 1,quad%n_quad
       tmp_val(:,n) = eval_fun%test_eval( n_dim, n_var, quad%quad_pts(:,n) )
