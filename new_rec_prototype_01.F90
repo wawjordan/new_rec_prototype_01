@@ -38,7 +38,7 @@ module project_inputs
   private
   public :: allocate_inputs, deallocate_inputs
   public :: job_name, verbose_level
-  public :: n_dim, rec_degree, n_rec_vars, n_nodes, n_ghost, n_skip, old, limit
+  public :: n_dim, rec_degree, n_rec_vars, n_nodes, n_ghost, n_skip, old, limit, lim_mod, use_vertex_nbors
   public :: geom_space_r, grid_perturb
   public :: out_quad_order, out_derivatives
   ! public :: space_coefs, time_coefs
@@ -56,6 +56,8 @@ module project_inputs
   integer, dimension(3) :: n_skip        = [1,1,1]
   logical  :: old           = .false.
   logical  :: limit         = .false.
+  integer  :: lim_mod       = 1
+  logical  :: use_vertex_nbors = .true.
   real(dp) :: geom_space_r = 1.1_dp
   real(dp) :: grid_perturb = zero
   integer  :: out_quad_order=1
@@ -296,14 +298,14 @@ end module namelist_helper
 module nml_project
   use namelist_helper, only : nml_warnings
   use project_inputs, only : job_name, verbose_level, n_dim, rec_degree, n_rec_vars,     &
-                             n_nodes, n_ghost, n_skip, old, limit,             &
+                             n_nodes, n_ghost, n_skip, old, limit, lim_mod, use_vertex_nbors,           &
                              grid_perturb, geom_space_r, out_quad_order, out_derivatives
   implicit none
   private
   public :: read_nml_project
   public :: write_nml_project
   namelist /project/ job_name, verbose_level, n_dim, n_rec_vars, rec_degree, n_nodes,    &
-                     n_ghost, n_skip, old, limit, grid_perturb, geom_space_r, out_quad_order, out_derivatives
+                     n_ghost, n_skip, old, limit, lim_mod, use_vertex_nbors, grid_perturb, geom_space_r, out_quad_order, out_derivatives
 contains
   subroutine read_nml_project( nml_unit, quiet, err_tot, option_error )
     use project_inputs, only : allocate_inputs
@@ -324,6 +326,8 @@ contains
     n_skip        = [1,1,1]
     old           = .false.
     limit         = .false.
+    lim_mod       = 1
+    use_vertex_nbors = .true.
     grid_perturb  = zero
     geom_space_r  = one
     out_quad_order=1
@@ -926,10 +930,80 @@ module stencil_indexing
 
   public :: get_bounding_box
 
+  public :: get_all_interior_vertex_nbors
+
   integer, parameter, dimension(7) :: map_idx = [5,3,1,0,2,4,6]
   integer, parameter, dimension(3,6) :: cell_offsets = reshape(                &
                               [-1,0,0,1,0,0,0,-1,0,0,1,0,0,0,-1,0,0,1],[3,6])
 contains
+
+  pure subroutine get_all_interior_vertex_nbors(n_dim,lin_idx,blk_size,n_nbor,nbor_list,status)
+    use index_conversion, only : range_intersect, in_bound, global2local, local2global
+    integer,                         intent(in)  :: n_dim, lin_idx
+    integer, dimension(n_dim),       intent(in)  :: blk_size
+    integer,                         intent(out) :: n_nbor
+    integer, dimension(3**n_dim-1),  intent(out) :: nbor_list
+    integer,                         intent(out) :: status
+    integer, dimension(3**n_dim-1) :: linear_offset_list
+    integer, dimension(n_dim) :: idx, lo, hi, idx_tmp
+    integer :: i, N_max, N_total_cells
+
+    N_total_cells = product(blk_size)
+
+    ! check if lin_idx is in bounds
+    if ( .not.( range_intersect(1,N_total_cells,lin_idx,lin_idx) ) ) then
+      n_nbor = 0
+      nbor_list = 0
+      status    = -1
+      return
+    end if
+
+    idx = global2local(lin_idx,blk_size)
+    hi = max(blk_size-2,1)
+    lo = min(hi,2)
+    N_max = 3**n_dim-1
+    linear_offset_list = get_nearest_nbor_offset_list(n_dim)
+    
+    if ( in_bound(n_dim,idx,lo,hi) ) then
+      n_nbor = N_max
+      status    = 0 ! cell is on the interior
+      do i = 1,N_max
+        nbor_list(i) = local2global(get_nearest_nbor_idx(n_dim,linear_offset_list(i),idx),blk_size)
+      end do
+    else
+      status    = 1 ! cell is on the boundary
+      n_nbor = 0
+      hi = blk_size
+      lo = 1
+      do i = 1,N_max
+        idx_tmp = get_nearest_nbor_idx(n_dim,linear_offset_list(i),idx)
+        ! if neighbor is in bounds
+        if ( in_bound(n_dim,idx_tmp,lo,hi) ) then
+          n_nbor = n_nbor + 1
+          nbor_list(n_nbor) = local2global(idx_tmp,blk_size)
+        end if
+      end do
+    end if
+  end subroutine get_all_interior_vertex_nbors
+
+  pure function get_nearest_nbor_offset_list(n_dim) result(linear_offset_list)
+    integer,            intent(in) :: n_dim
+    integer, dimension(3**n_dim-1) :: linear_offset_list
+    integer :: i, mid, N
+    N = 3**n_dim
+    mid = N/2 + 1
+    linear_offset_list = [(i,i=1,mid-1),(i,i=mid+1,N)]
+  end function get_nearest_nbor_offset_list
+
+  pure function get_nearest_nbor_idx(n_dim,linear_offset,idx) result(nbor)
+    use index_conversion, only : global2local
+    integer,                   intent(in)  :: n_dim, linear_offset
+    integer, dimension(n_dim), intent(in)  :: idx
+    integer, dimension(n_dim)              :: nbor
+    integer, dimension(n_dim) :: nsub
+    nsub = 3
+    nbor = idx + global2local(linear_offset,nsub)-2
+  end function get_nearest_nbor_idx
 
   pure function get_linear_face_idx( idx )
     integer, dimension(3),   intent(in) :: idx
@@ -4598,6 +4672,7 @@ contains
     real(dp), optional,     intent(in) :: t
     real(dp), dimension(this%n_eq)     :: q
     integer :: i
+
     q = sin(pi*x(1))
     do i = 2,this%n_dim
       q = q*sin(pi*x(i))
@@ -4605,6 +4680,68 @@ contains
   end function eval_test_fun2
 
 end module test_function_2
+
+
+module test_function_3
+  use set_precision, only : dp
+  use function_holder_type, only : func_h_t
+  implicit none
+  private
+  public :: test_fun3_t
+
+  type, extends(func_h_t) :: test_fun3_t
+    real(dp), dimension(:,:), allocatable :: dx, x0
+  contains
+    procedure :: eval    => eval_test_fun3
+    procedure :: destroy => destroy_test_fun3
+  end type test_fun3_t
+
+  interface test_fun3_t
+    procedure constructor
+  end interface test_fun3_t
+contains
+  function constructor(n_dim,n_eq,space_scale,space_origin) result(this)
+    use set_constants, only : zero, one, near_zero, half, fourth
+    integer,                                   intent(in) :: n_dim, n_eq
+    real(dp), dimension(n_dim,n_eq), optional, intent(in) :: space_scale, space_origin
+    type(test_fun3_t)                                           :: this
+    call this%destroy()
+    call this%initialize_super(n_eq,n_dim)
+    allocate( this%dx(n_dim,n_eq) )
+    allocate( this%x0(n_dim,n_eq) )
+    this%dx = fourth
+    this%x0 = -half
+    if ( present(space_scale) ) then
+      this%dx = sign(one,space_scale) * max(near_zero,abs(space_scale))
+    end if
+    if ( present(space_origin) ) this%x0 = space_origin
+  end function constructor
+
+  pure elemental subroutine destroy_test_fun3(this)
+    class(test_fun3_t), intent(inout) :: this
+    if ( allocated(this%dx)   ) deallocate( this%dx   )
+    if ( allocated(this%x0)   ) deallocate( this%x0   )
+  end subroutine destroy_test_fun3
+
+  pure function eval_test_fun3( this, x, t ) result(q)
+    use set_constants, only : one, four, pi
+    class(test_fun3_t),        intent(in) :: this
+    real(dp), dimension(:), intent(in) :: x
+    real(dp), optional,     intent(in) :: t
+    real(dp), dimension(this%n_eq)     :: q
+    integer :: i
+    real(dp), dimension(this%n_dim,this%n_eq) :: x_bar
+    do i = 1,this%n_eq
+      x_bar(:,i) = (x(1:this%n_dim) - this%x0(:,i)) / this%dx(:,i)
+    end do
+    if (x_bar(1,1)<-four) then
+        q = 3.857143_dp
+    else
+      q = one + 0.2_dp*sin(5.0_dp*x_bar(1,:))
+    end if
+  end function eval_test_fun3
+
+end module test_function_3
 
 module cylinder_cone_bump
   use set_precision, only : dp
@@ -5429,6 +5566,37 @@ contains
     tmp = near_zero ! anchor for debugging
   end function get_alpha_val_1
 
+  pure function get_alpha_val_new(u_i,u_c,u_min,u_max) result(alpha)
+    use set_constants, only : zero, one, near_zero
+    real(dp), intent(in) :: u_i, u_c, u_min, u_max
+    real(dp)             :: alpha
+    real(dp) :: diff, alpha_tmp
+    diff = u_i - u_c
+    if ( abs(diff) < near_zero ) then
+      alpha = one
+    elseif ( diff > zero ) then
+      alpha_tmp = (u_max - u_c)/diff
+      alpha = min(one,alpha_tmp)
+    elseif ( diff < zero ) then
+      alpha_tmp = (u_min - u_c)/diff
+      alpha = min(one,alpha_tmp)
+    end if
+  end function get_alpha_val_new
+
+  pure function apply_alpha_to_coefs(p,coefs_in,alpha_in) result(coefs_out)
+    class(monomial_basis_t),  intent(in)    :: p
+    real(dp), dimension(p%n_terms),     intent(in)  :: coefs_in
+    real(dp), dimension(p%total_degree), intent(in) :: alpha_in
+    real(dp), dimension(p%n_terms)                  :: coefs_out
+    integer :: d, term
+    coefs_out = coefs_in
+    do d = 1,p%total_degree
+      do term = p%idx(d-1)+1,p%idx(d) ! for each term with this total degree:
+        coefs_out(term) = alpha_in(d) * coefs_in(term)
+      end do
+    end do
+  end function apply_alpha_to_coefs
+
 
   pure function get_alpha_val(n_dim,grad,dx,u_c,u_min,u_max) result(alpha)
     use set_constants, only : zero, one, near_zero
@@ -5453,7 +5621,7 @@ contains
     alpha_compare = get_alpha_val_1(n_dim,grad,dx,u_c,u_min,u_max)
     diff = alpha - alpha_compare ! debug anchor
   end function get_alpha_val
-
+    
   pure function linear_reconstruction(n_dim,u_c,grad_c,dx) result(u_i)
     integer,                    intent(in) :: n_dim
     real(dp),                   intent(in) :: u_c
@@ -5463,6 +5631,82 @@ contains
   end function  linear_reconstruction
   
   ! call this for the corresponding cell vertices
+  ! pure subroutine update_alpha( this, p, basis, point, coefs )
+  !   use set_constants, only : zero, one, near_zero
+  !   class(zero_mean_limit_t), intent(inout) :: this
+  !   class(monomial_basis_t),  intent(in)    :: p
+  !   class(zero_mean_basis_t), intent(in)    :: basis
+  !   real(dp), dimension(:),   intent(in)    :: point
+  !   real(dp), dimension(:,:), intent(in)    :: coefs
+  !   real(dp), dimension(p%n_terms,this%n_vars) :: tcoefs
+  !   integer, dimension(p%n_dim) :: grad_idx
+  !   real(dp), dimension(p%n_dim) :: grad, dx
+  !   real(dp) :: alpha, u_min, u_max, u_c, u_unlimited, u_limited, diff
+  !   real(dp), parameter :: tol = 0.01_dp
+  !   integer :: v, d, term
+  !   ! transform coefficients to get derivatives at reference point
+  !   tcoefs = basis%transform_coefs(p,coefs,p%n_terms,this%n_vars,this%var_idx)
+  !   dx = point(1:p%n_dim) - basis%x_ref ! x_i - x_c
+  !   do v = 1,this%n_vars
+  !     ! higher order terms
+  !     do d = p%total_degree-1,1,-1
+  !       do term = p%idx(d-1)+1,p%idx(d) ! for each term with this total degree:
+  !         grad_idx = p%diff_idx(:,term) ! indices to extract gradient information
+  !         grad = tcoefs(grad_idx,v)
+  !         alpha = zero
+  !         u_c   = tcoefs(term,v)
+  !         u_min = this%v_min(d,v)
+  !         u_max = this%v_max(d,v)
+  !         u_unlimited = linear_reconstruction(p%n_dim,u_c,grad,dx)
+  !         alpha = get_alpha_val(p%n_dim,grad,dx,u_c,u_min,u_max)
+  !         this%alpha(d+1,v) = min( this%alpha(d+1,v), alpha )
+  !         u_limited = linear_reconstruction(p%n_dim,u_c,this%alpha(d+1,v)*grad,dx)
+  !         if ( ( u_unlimited > u_max ).or.(u_unlimited < u_min ) ) then
+  !           diff = u_unlimited - u_limited
+  !         end if
+  !         if ( abs(one-alpha)>tol .and. abs(alpha)>tol ) then
+  !           diff = u_unlimited - u_limited
+  !         end if
+  !         ! this%alpha(d,v) = min( this%alpha(d,v), get_alpha_val(p%n_dim,grad,dx,u_c,u_min,u_max) )
+  !       end do
+  !       ! as soon as alpha_e^(q)=1 is encountered, no further limiting is required
+  !       ! if ( abs(this%alpha(d+1,v) - one )< near_zero ) exit
+  !     end do
+
+  !     ! regular linear limiting
+  !     d = 0
+  !     term = 1
+  !     grad_idx = p%diff_idx(:,term) ! indices to extract gradient information
+  !     grad = tcoefs(grad_idx,v)
+  !     alpha = zero
+  !     u_c   = tcoefs(term,v)
+  !     u_min = this%v_min(d,v)
+  !     u_max = this%v_max(d,v)
+  !     u_unlimited = linear_reconstruction(p%n_dim,u_c,grad,dx)
+  !     alpha = get_alpha_val(p%n_dim,grad,dx,u_c,u_min,u_max)
+  !     this%alpha(d+1,v) = min( this%alpha(d+1,v), alpha )
+  !     u_limited = linear_reconstruction(p%n_dim,u_c,this%alpha(d+1,v)*grad,dx)
+  !     if ( ( u_limited > u_max ).or.(u_limited < u_min ) ) then
+  !       diff = u_unlimited - u_limited
+  !     end if
+  !     if ( abs(one-alpha)>tol .and. abs(alpha)>tol ) then
+  !       diff = u_unlimited - u_limited
+  !     end if
+
+  !     ! do d = p%total_degree-1,0,-1
+  !     !   ! alpha_e^(p) := max_{p<=q} alpha_e^(q), p>=1
+  !     !   this%alpha(d+1,v) = maxval(this%alpha(d+1:p%total_degree,v))
+  !     ! end do
+
+  !     ! first derivatives
+  !     ! this%alpha(1,v) = max(this%alpha(1,v),this%alpha(2,v))
+  !   end do
+  !   if ( any( abs(this%alpha - one )> tol ) ) then
+  !     alpha = this%alpha(1,1)
+  !   end if
+  ! end subroutine update_alpha
+
+  ! call this for the corresponding cell vertices
   pure subroutine update_alpha( this, p, basis, point, coefs )
     use set_constants, only : zero, one, near_zero
     class(zero_mean_limit_t), intent(inout) :: this
@@ -5471,73 +5715,136 @@ contains
     real(dp), dimension(:),   intent(in)    :: point
     real(dp), dimension(:,:), intent(in)    :: coefs
     real(dp), dimension(p%n_terms,this%n_vars) :: tcoefs
+    real(dp), dimension(p%n_terms,1) :: coefs_tmp
     integer, dimension(p%n_dim) :: grad_idx
     real(dp), dimension(p%n_dim) :: grad, dx
-    real(dp) :: alpha, u_min, u_max, u_c, u_unlimited, u_limited, diff
+    real(dp), dimension(1)       :: u_tmp
+    real(dp) :: alpha1, u_c1, u_unlim1, u_lim1
+    real(dp) :: alpha2, u_c2, u_unlim2, u_lim2, u_inter
+    real(dp) :: u_min, u_max, diff, alpha_tmp
     real(dp), parameter :: tol = 0.01_dp
     integer :: v, d, term
     ! transform coefficients to get derivatives at reference point
     tcoefs = basis%transform_coefs(p,coefs,p%n_terms,this%n_vars,this%var_idx)
+
     dx = point(1:p%n_dim) - basis%x_ref ! x_i - x_c
+    
     do v = 1,this%n_vars
       ! higher order terms
       do d = p%total_degree-1,1,-1
         do term = p%idx(d-1)+1,p%idx(d) ! for each term with this total degree:
-          grad_idx = p%diff_idx(:,term) ! indices to extract gradient information
-          grad = tcoefs(grad_idx,v)
-          alpha = zero
-          u_c   = tcoefs(term,v)
+          alpha_tmp = zero
+          alpha1    = zero
+          alpha2    = zero
+
           u_min = this%v_min(d,v)
           u_max = this%v_max(d,v)
-          u_unlimited = linear_reconstruction(p%n_dim,u_c,grad,dx)
-          alpha = get_alpha_val(p%n_dim,grad,dx,u_c,u_min,u_max)
-          this%alpha(d+1,v) = min( this%alpha(d+1,v), alpha )
-          u_limited = linear_reconstruction(p%n_dim,u_c,this%alpha(d+1,v)*grad,dx)
-          if ( ( u_limited > u_max ).or.(u_limited < u_min ) ) then
-            diff = u_unlimited - u_limited
-          end if
-          if ( abs(one-alpha)>tol .and. abs(alpha)>tol ) then
-            diff = u_unlimited - u_limited
-          end if
-          ! this%alpha(d,v) = min( this%alpha(d,v), get_alpha_val(p%n_dim,grad,dx,u_c,u_min,u_max) )
-        end do
-        ! as soon as alpha_e^(q)=1 is encountered, no further limiting is required
-        ! if ( abs(this%alpha(d+1,v) - one )< near_zero ) exit
-      end do
 
+          grad_idx  = p%diff_idx(:,term) ! indices to extract gradient information
+          grad      = tcoefs(grad_idx,v)
+          
+          u_c1      = tcoefs(term,v)
+          u_unlim1  = linear_reconstruction(p%n_dim,u_c1,grad,dx)
+          alpha_tmp = get_alpha_val(p%n_dim,grad,dx,u_c1,u_min,u_max)
+          alpha1    = get_alpha_val_new(u_unlim1,u_c1,u_min,u_max)
+
+
+          ! look at scaling for drec_eval...
+
+
+          
+          ! unlimited reconstruction derivative evaluated at cell center
+          u_tmp = basis%drec_eval(p,basis%x_ref,coefs,p%n_terms,1,[v],p%exponents(:,term))
+          u_c2  = u_tmp(1)
+
+          ! unlimited reconstruction derivative evaluated at point
+          u_tmp = basis%drec_eval(p,point,coefs,p%n_terms,1,[v],p%exponents(:,term))
+          u_unlim2  = u_tmp(1)
+
+          ! intermediate reconstruction with existing alphas applied
+          coefs_tmp(:,1) = apply_alpha_to_coefs(p,coefs(:,v:v),this%alpha(:,v))
+          u_tmp = basis%drec_eval(p,point,coefs_tmp,p%n_terms,1,[1],p%exponents(:,term))
+          u_inter  = u_tmp(1)
+
+          alpha2 = max(get_alpha_val_new(u_inter,u_c2,u_min,u_max),zero)
+
+          this%alpha(d+1,v) = min( this%alpha(d+1,v), alpha2 )
+
+          ! linear reconstruction at point
+          u_lim1 = linear_reconstruction(p%n_dim,u_c1,this%alpha(d+1,v)*grad,dx)
+
+          ! limited reconstruction at point
+          coefs_tmp(:,1) = apply_alpha_to_coefs(p,coefs(:,v:v),this%alpha(:,v))
+          u_tmp = basis%drec_eval(p,point,coefs_tmp,p%n_terms,1,[1],p%exponents(:,term))
+          u_lim2 = u_tmp(1)
+
+          if ( abs(one-alpha1)>tol .and. abs(alpha1)>tol ) then
+            diff = u_unlim1 - u_lim1
+          end if
+
+          if ( abs(u_c1-u_c2)>tol ) then
+            diff = u_c1 - u_c2
+          end if
+
+          if ( abs(one-alpha2)>tol .and. abs(alpha2)>tol ) then
+            diff = u_unlim2 - u_lim2
+          end if
+
+        end do
+      end do
       ! regular linear limiting
       d = 0
       term = 1
-      grad_idx = p%diff_idx(:,term) ! indices to extract gradient information
-      grad = tcoefs(grad_idx,v)
-      alpha = zero
-      u_c   = tcoefs(term,v)
+      alpha_tmp = zero
+      alpha1    = zero
+      alpha2    = zero
+
       u_min = this%v_min(d,v)
       u_max = this%v_max(d,v)
-      u_unlimited = linear_reconstruction(p%n_dim,u_c,grad,dx)
-      alpha = get_alpha_val(p%n_dim,grad,dx,u_c,u_min,u_max)
-      this%alpha(d+1,v) = min( this%alpha(d+1,v), alpha )
-      u_limited = linear_reconstruction(p%n_dim,u_c,this%alpha(d+1,v)*grad,dx)
-      if ( ( u_limited > u_max ).or.(u_limited < u_min ) ) then
-        diff = u_unlimited - u_limited
-      end if
-      if ( abs(one-alpha)>tol .and. abs(alpha)>tol ) then
-        diff = u_unlimited - u_limited
+
+      grad_idx  = p%diff_idx(:,term) ! indices to extract gradient information
+      grad      = tcoefs(grad_idx,v)
+      
+      u_c1      = tcoefs(term,v)
+      u_unlim1  = linear_reconstruction(p%n_dim,u_c1,grad,dx)
+      alpha_tmp = get_alpha_val(p%n_dim,grad,dx,u_c1,u_min,u_max)
+      alpha1    = get_alpha_val_new(u_unlim1,u_c1,u_min,u_max)
+
+
+      ! unlimited reconstruction derivative evaluated at cell center
+      u_tmp = basis%drec_eval(p,basis%x_ref,coefs,p%n_terms,1,[v],p%exponents(:,term))
+      u_c2  = u_tmp(1)
+
+      ! unlimited reconstruction derivative evaluated at point
+      u_tmp = basis%drec_eval(p,point,coefs,p%n_terms,1,[v],p%exponents(:,term))
+      u_unlim2  = u_tmp(1)
+
+      ! intermediate reconstruction with existing alphas applied
+      coefs_tmp(:,1) = apply_alpha_to_coefs(p,coefs(:,v:v),this%alpha(:,v))
+      u_tmp = basis%drec_eval(p,point,coefs_tmp,p%n_terms,1,[1],p%exponents(:,term))
+      u_inter  = u_tmp(1)
+
+      alpha2 = max(get_alpha_val_new(u_inter,u_c2,u_min,u_max),zero)
+
+      this%alpha(d+1,v) = min( this%alpha(d+1,v), alpha2 )
+
+      ! linear reconstruction at point
+      u_lim1 = linear_reconstruction(p%n_dim,u_c1,this%alpha(d+1,v)*grad,dx)
+
+      ! limited reconstruction at point
+      coefs_tmp(:,1) = apply_alpha_to_coefs(p,coefs(:,v:v),this%alpha(:,v))
+      u_tmp = basis%drec_eval(p,point,coefs_tmp,p%n_terms,1,[1],p%exponents(:,term))
+      u_lim2 = u_tmp(1)
+
+      if ( abs(one-alpha1)>tol .and. abs(alpha1)>tol ) then
+        diff = u_unlim1 - u_lim1
       end if
 
-      do d = p%total_degree-1,0,-1
-        ! alpha_e^(p) := max_{p<=q} alpha_e^(q), p>=1
-        this%alpha(d+1,v) = maxval(this%alpha(d+1:p%total_degree,v))
-      end do
-
-      ! first derivatives
-      ! this%alpha(1,v) = max(this%alpha(1,v),this%alpha(2,v))
+      if ( abs(one-alpha2)>tol .and. abs(alpha2)>tol ) then
+        diff = u_unlim2 - u_lim2
+      end if
     end do
-    if ( any( abs(this%alpha - one )> tol ) ) then
-      alpha = this%alpha(1,1)
-    end if
   end subroutine update_alpha
-
 end module zero_mean_limiter_type
 
 module reconstruct_cell_derived_type
@@ -6243,64 +6550,121 @@ contains
 
   pure subroutine update_limiter_block( this, rblock, gblock )
     use set_precision,     only : dp
-    use set_constants,     only : one, large
+    use set_constants,     only : one, large, near_zero
+    use project_inputs,    only : lim_mod, use_vertex_nbors
     use index_conversion,  only : global2local
+    use stencil_indexing,  only : get_all_interior_vertex_nbors
     use grid_derived_type, only : grid_block, pack_cell_node_coords
     class(limiter_block_t), intent(inout) :: this
     type(rec_block_t),      intent(in)    :: rblock
     type(grid_block),       intent(in)    :: gblock
-    integer :: i, n, j, v, d
+    integer :: i, n, j, v, d, status
     integer, dimension(3) :: idx
     integer, dimension(:,:), allocatable :: debug_nbor_idx
     integer, dimension(6) :: face_nbors
-    integer :: n_face_nbors, n_cell_nodes
+    integer, dimension(3**rblock%p%n_dim-1) :: vertex_nbors
+    integer :: n_face_nbors, n_cell_nodes, n_vertex_nbors
     real(dp), dimension(3,product(rblock%n_skip+1)) :: nodes
     
     n_cell_nodes = product(rblock%n_skip+1)
 
     ! first get the min-max values for coefficients
-    do i = 1,this%n_cells_total
-      this%lim(i)%v_max = -large
-      this%lim(i)%v_min =  large
-      this%lim(i)%alpha = one
-      call this%lim(i)%update_min_max(rblock%p,rblock%cells(i)%basis,rblock%cells(i)%coefs)
-      face_nbors = 0
-      n_face_nbors = count( rblock%cells(i)%nbor_degree==1 )
-      face_nbors(1:n_face_nbors) = pack( rblock%cells(i)%nbor_idx, rblock%cells(i)%nbor_degree==1 )
-      ! do n = 1,rblock%cells(i)%n_nbor
-      do n = 1,n_face_nbors
-        j = face_nbors(n)
-        call this%lim(i)%update_min_max(rblock%p,rblock%cells(j)%basis,rblock%cells(j)%coefs)
+    if (use_vertex_nbors) then
+      do i = 1,this%n_cells_total
+        this%lim(i)%v_max = -large
+        this%lim(i)%v_min =  large
+        this%lim(i)%alpha = one
+        call this%lim(i)%update_min_max(rblock%p,rblock%cells(i)%basis,rblock%cells(i)%coefs)
+        face_nbors = 0
+        n_face_nbors = count( rblock%cells(i)%nbor_degree==1 )
+        face_nbors(1:n_face_nbors) = pack( rblock%cells(i)%nbor_idx, rblock%cells(i)%nbor_degree==1 )
+
+        call get_all_interior_vertex_nbors(rblock%p%n_dim,i,rblock%n_cells,n_vertex_nbors,vertex_nbors,status)
+        do n = 1,n_vertex_nbors
+          j = vertex_nbors(n)
+          call this%lim(i)%update_min_max(rblock%p,rblock%cells(j)%basis,rblock%cells(j)%coefs)
+        end do
       end do
+    else
+      do i = 1,this%n_cells_total
+        this%lim(i)%v_max = -large
+        this%lim(i)%v_min =  large
+        this%lim(i)%alpha = one
+        call this%lim(i)%update_min_max(rblock%p,rblock%cells(i)%basis,rblock%cells(i)%coefs)
+        face_nbors = 0
+        n_face_nbors = count( rblock%cells(i)%nbor_degree==1 )
+        face_nbors(1:n_face_nbors) = pack( rblock%cells(i)%nbor_idx, rblock%cells(i)%nbor_degree==1 )
+        do n = 1,n_face_nbors
+          j = face_nbors(n)
+          call this%lim(i)%update_min_max(rblock%p,rblock%cells(j)%basis,rblock%cells(j)%coefs)
+        end do
+      end do
+    end if
+      
+    do i = 1,this%n_cells_total
+      idx = global2local(i,gblock%n_cells)
+      nodes = pack_cell_node_coords( global2local(i,gblock%n_cells), [1,1,1], gblock%n_nodes, rblock%n_skip, gblock%node_coords )
+
+      ! special treatment for boundaries
       if ( rblock%cells(i)%n_bnd > 0 ) then
-        nodes = pack_cell_node_coords( global2local(i,gblock%n_cells), [1,1,1], gblock%n_nodes, rblock%n_skip, gblock%node_coords )
         do n = 1,n_cell_nodes
-          call this%lim(i)%update_min_max_point(rblock%p,rblock%cells(j)%basis,rblock%cells(j)%coefs,nodes(:,n))
+          call this%lim(i)%update_min_max_point(rblock%p,rblock%cells(i)%basis,rblock%cells(i)%coefs,nodes(:,n))
         end do
         ! do n = 1,rblock%cells(i)%n_bnd
           ! need face to vertex mapping
           ! loop over appropriate vertices
         ! end do
       end if
-    end do
-    
-    do i = 1,this%n_cells_total
-      idx = global2local(i,gblock%n_cells)
-      nodes = pack_cell_node_coords( global2local(i,gblock%n_cells), [1,1,1], gblock%n_nodes, rblock%n_skip, gblock%node_coords )
+
+      ! update limiter values
       do n = 1,n_cell_nodes
         call this%lim(i)%update_limiter(rblock%p,rblock%cells(i)%basis,nodes(:,n),rblock%cells(i)%coefs)
       end do
-      ! alpha_e^(p) := max_{p<=q} alpha_e^(q), p>=1
-      do v = 1,this%lim(i)%n_vars
-        ! do d = rblock%p%total_degree-1,0,-1
-        !   this%lim(i)%alpha(d+1,v) = maxval(this%lim(i)%alpha(d+1:rblock%p%total_degree,v))
-        ! end do
-        do d = 0,rblock%p%total_degree-1
-          this%lim(i)%alpha(d+1,v) = minval(this%lim(i)%alpha(1:d+1,v))
-          ! this%lim(i)%alpha(d+1,v) = product(this%lim(i)%alpha(1:d+1,v))
+    end do
+
+    ! alpha_e^(p) := max_{p<=q} alpha_e^(q), p>=1
+    select case(lim_mod)
+    case(0) ! don't modify
+      continue
+    case(1) ! maximum value + stop limiting after unlimited is found
+      do i = 1,this%n_cells_total
+        do v = 1,this%lim(i)%n_vars
+          do d = rblock%p%total_degree-1,0,-1
+            if ( abs(this%lim(i)%alpha(d+1,v)-one)<near_zero ) then
+              this%lim(i)%alpha(1:d+1,v) = one ! reset to unlimited
+              exit
+            end if
+            this%lim(i)%alpha(d+1,v) = maxval(this%lim(i)%alpha(d+1:rblock%p%total_degree,v))
+          end do
         end do
       end do
-    end do
+    case(2) ! maximum value
+      do i = 1,this%n_cells_total
+        do v = 1,this%lim(i)%n_vars
+          do d = rblock%p%total_degree-1,0,-1
+            this%lim(i)%alpha(d+1,v) = maxval(this%lim(i)%alpha(d+1:rblock%p%total_degree,v))
+          end do
+        end do
+      end do
+    case(3) ! minimum value
+      do i = 1,this%n_cells_total
+        do v = 1,this%lim(i)%n_vars
+          do d = 0,rblock%p%total_degree-1
+            this%lim(i)%alpha(d+1,v) = minval(this%lim(i)%alpha(1:d+1,v))
+          end do
+        end do
+      end do
+    case(4) ! product value
+      do i = 1,this%n_cells_total
+        do v = 1,this%lim(i)%n_vars
+          do d = rblock%p%total_degree-1,1,-1
+            this%lim(i)%alpha(d+1,v) = product(this%lim(i)%alpha(d+1:rblock%p%total_degree,v))
+          end do
+        end do
+      end do
+    case default
+      continue
+    end select
 
   end subroutine update_limiter_block
     
@@ -6989,6 +7353,7 @@ contains
     use function_holder_type, only : func_h_t
     use test_function_1,      only : test_fun1_t
     use test_function_2,      only : test_fun2_t
+    use test_function_3,      only : test_fun3_t
     use cross_term_sinusoid,  only : cts_t
     use cylinder_cone_bump,   only : ccb_t
     use message,              only : error_message
@@ -7001,12 +7366,16 @@ contains
     case(2)
       allocate( eval_fun, source=test_fun2_t( n_dim, n_rec_vars ) )
     case(3)
+      allocate( eval_fun, source=test_fun3_t( n_dim, n_rec_vars, &
+                                    space_scale=space_scale, &
+                                    space_origin=space_origin) )
+    case(4)
       allocate( eval_fun, source=cts_t( n_dim, n_rec_vars,       &
                                     rand_coefs=rand_coefs,   &
                                     rand_seed=rand_seed,     &
                                     space_scale=space_scale, &
                                     space_origin=space_origin) )
-    case(4)
+    case(5)
       allocate( eval_fun, source=ccb_t( n_dim, n_rec_vars,       &
                                     space_scale=space_scale, &
                                     space_origin=space_origin) )
