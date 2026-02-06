@@ -4547,6 +4547,7 @@ module function_holder_type
   type, abstract :: func_h_t
     integer :: n_eq
     integer :: n_dim
+    logical :: derivatives_implemented
   contains
     procedure :: initialize_super
     procedure, pass :: test_eval
@@ -4634,6 +4635,7 @@ contains
     integer,      intent(in)    :: n_eq, n_dim
     this%n_eq     = n_eq
     this%n_dim    = n_dim
+    this%derivatives_implemented = .false.
   end subroutine initialize_super
 
   pure function test_eval( this, n_dim, n_var, x ) result(val)
@@ -4882,6 +4884,77 @@ contains
   end function eval_test_fun3
 
 end module test_function_3
+
+module test_function_4
+  use function_holder_type, only : func_h_t
+  use set_precision,        only : dp
+  implicit none
+  private
+  public :: test_fun4_t
+
+  type, extends(func_h_t) :: test_fun4_t
+  contains
+    procedure :: eval      => eval_test_fun4
+    procedure :: dx_eval   => dx_eval_test_fun4
+    procedure :: destroy   => destroy_test_fun4
+  end type test_fun4_t
+
+  interface test_fun4_t
+    procedure constructor
+  end interface test_fun4_t
+contains
+  function constructor(n_dim,n_eq) result(this)
+    integer, intent(in) :: n_dim, n_eq
+    type(test_fun4_t)   :: this
+    call this%destroy()
+    call this%initialize_super(n_eq,n_dim)
+    this%derivatives_implemented = .true.
+  end function constructor
+
+  pure elemental subroutine destroy_test_fun4(this)
+    class(test_fun4_t), intent(inout) :: this
+    continue
+  end subroutine destroy_test_fun4
+
+  pure function eval_test_fun4( this, x, t ) result(q)
+    class(test_fun4_t),        intent(in) :: this
+    real(dp), dimension(:), intent(in) :: x
+    real(dp), optional,     intent(in) :: t
+    real(dp), dimension(this%n_eq)     :: q
+    q = 1.0_dp + x(1) - x(1)**2 - x(1)**3 - x(1)**4
+  end function eval_test_fun4
+
+  pure function dx_eval_test_fun4( this, x, t, order ) result(dqdx)
+    class(test_fun4_t),        intent(in) :: this
+    real(dp), dimension(:),                    intent(in) :: x
+    real(dp),                        optional, intent(in) :: t
+    integer,  dimension(this%n_dim), optional, intent(in) :: order
+    real(dp), dimension(this%n_eq)                        :: dqdx
+    integer :: tmp_order
+
+    if (present(order)) then
+      tmp_order = order(1)
+      select case(tmp_order)
+      case(0)
+        dqdx = 1.0_dp + 1.0_dp*x(1) - 1.0_dp*x(1)**2 - 1.0_dp*x(1)**3 -  1.0_dp*x(1)**4
+      case(1)
+        ! dqdx = one + x(1) - x(1)**2 - x(1)**3 - x(1)**4
+        dqdx =          1.0_dp      - 2.0_dp*x(1)    - 3.0_dp*x(1)**2 -  4.0_dp*x(1)**3
+      case(2)
+        dqdx =                      - 2.0_dp         - 6.0_dp*x(1)    - 12.0_dp*x(1)**2
+      case(3)
+        dqdx =                                       - 6.0_dp         - 24.0_dp*x(1)
+      case(4)
+        dqdx =                                                        - 24.0_dp
+      case default
+        dqdx = 0.0_dp
+      end select
+    else
+      dqdx = this%eval(x,t=t)
+    end if
+  end function dx_eval_test_fun4
+
+end module test_function_4
 
 module cylinder_cone_bump
   use set_precision, only : dp
@@ -5564,7 +5637,7 @@ pure function evaluate_reconstruction( this, p, point, coefs, n_terms, n_var, va
   end function evaluate_reconstruction
 
   pure function evaluate_reconstruction_derivative( this, p, point, coefs, n_terms, n_var, var_idx, order ) result(val)
-    use set_constants, only : zero
+    use set_constants, only : zero, one
     class(zero_mean_basis_t),   intent(in) :: this
     type(monomial_basis_t),     intent(in) :: p
     real(dp), dimension(:),     intent(in) :: point
@@ -5575,9 +5648,11 @@ pure function evaluate_reconstruction( this, p, point, coefs, n_terms, n_var, va
     real(dp), dimension(n_var)             :: val
     real(dp), dimension(n_terms) :: basis
     integer :: v, n
+    real(dp), dimension(p%n_dim) :: scale
+    scale = one
     val = zero
     do n = 1,n_terms
-      basis(n) = this%deval(p,n,point,order)
+      basis(n) = this%deval(p,n,point,order) * this%length_scale(order,scale)
     end do
     do v = 1,n_var
       val(v) = val(v) + dot_product( coefs(1:n_terms,var_idx(v)), basis )
@@ -5904,6 +5979,7 @@ contains
 
           ! intermediate reconstruction with existing alphas applied
           coefs_tmp(:,1) = apply_alpha_to_coefs(p,coefs(:,v:v),this%alpha(:,v))
+          u_tmp = basis%rec_eval(p,point,coefs_tmp,p%n_terms,1,[1])
           u_tmp = basis%drec_eval(p,point,coefs_tmp,p%n_terms,1,[1],p%exponents(:,term))
           u_inter  = u_tmp(1)
 
@@ -6268,7 +6344,7 @@ module rec_block_derived_type
     procedure,         pass :: get_cell_h_ref
     procedure,         pass :: init_cell, solve_cell
     procedure, public, pass :: init_cells
-    procedure, public, pass :: get_cell_error
+    procedure, public, pass :: get_cell_error, get_cell_derivative_error
     procedure,         pass :: get_cell_LHS, get_cell_RHS
     procedure,         pass :: determine_maximum_degree
   end type rec_block_t
@@ -6452,6 +6528,39 @@ contains
     end if
     
   end function get_cell_error
+
+  pure function get_cell_derivative_error( this, quad, lin_idx, n_terms, norm,            &
+                                           n_var, var_idx, eval_fun, order, lim ) result(err)
+    use set_constants,           only : zero, one
+    use quadrature_derived_type, only : quad_t
+    use function_holder_type,    only : func_h_t
+    use zero_mean_limiter_type,  only : zero_mean_limit_t
+    class(rec_block_t),     intent(in) :: this
+    type(quad_t),           intent(in) :: quad
+    integer,                intent(in) :: lin_idx, n_terms, norm, n_var
+    integer, dimension(:),  intent(in) :: var_idx
+    class(func_h_t),        intent(in) :: eval_fun
+    integer, dimension(this%n_dim), intent(in) :: order
+    type(zero_mean_limit_t), optional, intent(in) :: lim
+    real(dp), dimension(n_var)                    :: err
+    real(dp), dimension(n_var) :: reconstructed, exact
+    real(dp), dimension(n_var,quad%n_quad) :: tmp_val
+    integer, parameter :: max_L_norm = 10
+    integer :: n
+    tmp_val = zero
+    do n = 1,quad%n_quad
+      exact = eval_fun%dx_eval( quad%quad_pts(:,n), order=order)
+      reconstructed = this%cells(lin_idx)%deval( this%p, quad%quad_pts(:,n),    &
+                                                n_terms, n_var, var_idx, order, lim=lim )
+      tmp_val(:,n) = abs( reconstructed - exact )
+    end do
+    if (norm>max_L_norm) then
+      err = maxval(tmp_val,dim=2)
+    else
+      err = quad%integrate( size(var_idx), tmp_val**norm )**(one/real(norm,dp))
+      err = err / sum( quad%quad_wts)**(one/real(norm,dp))
+    end if
+  end function get_cell_derivative_error
 
   subroutine init_cell( this, LHS, lin_idx, term_end )
     use math,              only : compute_pseudo_inverse
@@ -6834,7 +6943,7 @@ module rec_derived_type
     procedure, public, pass :: destroy => destroy_rec_t
     procedure, public, pass :: solve   => solve_rec
     procedure, public, pass :: eval    => evaluate_reconstruction
-    procedure, public, pass :: get_block_error_norms
+    procedure, public, pass :: get_block_error_norms, get_block_derivative_error_norms
   end type rec_t
 
   interface rec_t
@@ -7012,8 +7121,104 @@ contains
     end do
   end function get_block_error_norms
 
+
+  pure function get_block_derivative_error_norms( this, grid, blk, var_idx, n_terms, norms,         &
+                                                  eval_fun, order, lim ) result(err_norms)
+    use set_constants,           only : zero
+    use index_conversion,        only : global2local
+    use grid_derived_type,       only : grid_type
+    use quadrature_derived_type, only : quad_t
+    use function_holder_type,    only : func_h_t
+    use zero_mean_limiter_type,  only : zero_mean_limit_t
+    class(rec_t),             intent(in) :: this
+    type(grid_type),          intent(in) :: grid
+    integer,                  intent(in) :: blk
+    integer, dimension(:),    intent(in) :: var_idx
+    integer,                  intent(in) :: n_terms
+    integer, dimension(:),    intent(in) :: norms
+    integer, dimension(this%n_dim), intent(in) :: order
+    class(func_h_t),          intent(in) :: eval_fun
+    logical,                  intent(in) :: lim
+    real(dp), dimension(size(var_idx),size(norms)) :: err_norms
+    integer, dimension(this%n_dim) :: cell_idx
+    integer, dimension(3) :: tmp_idx
+    integer, parameter :: max_L_norm = 10
+    integer :: n, i, n_var
+    n_var = size(var_idx)
+    err_norms = zero
+    do n = 1,size(norms)
+      if (norms(n)>max_L_norm) then
+        do i = 1,this%b(blk)%n_cells_total
+          cell_idx = global2local(i,grid%gblock(blk)%n_cells(1:this%n_dim))
+          tmp_idx = 1
+          tmp_idx(1:this%n_dim) = cell_idx
+          associate( quad => grid%gblock(blk)%grid_vars%quad( tmp_idx(1),                &
+                                                    tmp_idx(2),                &
+                                                    tmp_idx(3) ) )
+            if ( lim ) then
+            err_norms(:,n) = max( err_norms(:,n),                              &
+                                  this%b(blk)%get_cell_derivative_error( quad, &
+                                                       i,                      &
+                                                       n_terms,                &
+                                                       norms(n),               &
+                                                       n_var,                  &
+                                                       var_idx,                &
+                                                       eval_fun,               &
+                                                       order,                  &
+                                                       lim=this%limb(blk)%lim(i)) )
+            else
+              err_norms(:,n) = max( err_norms(:,n),                            &
+                                  this%b(blk)%get_cell_derivative_error( quad, &
+                                                       i,                      &
+                                                       n_terms,                &
+                                                       norms(n),               &
+                                                       n_var,                  &
+                                                       var_idx,                &
+                                                       eval_fun,               &
+                                                       order ) )
+            end if
+          end associate
+        end do
+      else
+        do i = 1,this%b(blk)%n_cells_total
+          cell_idx = global2local( i, grid%gblock(blk)%n_cells(1:this%n_dim) )
+          tmp_idx = 1
+          tmp_idx(1:this%n_dim) = cell_idx
+          associate( quad => grid%gblock(blk)%grid_vars%quad( tmp_idx(1),                &
+                                                    tmp_idx(2),                &
+                                                    tmp_idx(3) ) )
+            if ( lim ) then
+              err_norms(:,n) = err_norms(:,n) +                                 &
+                               this%b(blk)%get_cell_derivative_error( quad,     &
+                                                                    i,          &
+                                                                    n_terms,    &
+                                                                    norms(n),   &
+                                                                    n_var,      &
+                                                                    var_idx,    &
+                                                                    eval_fun,   &
+                                                                    order,      &
+                                                                    lim=this%limb(blk)%lim(i) )
+            else
+              err_norms(:,n) = err_norms(:,n) +                                 &
+                               this%b(blk)%get_cell_derivative_error( quad,     &
+                                                                    i,          &
+                                                                    n_terms,    &
+                                                                    norms(n),   &
+                                                                    n_var,      &
+                                                                    var_idx,    &
+                                                                    eval_fun,   &
+                                                                    order )
+            end if
+          end associate
+        end do
+        err_norms(:,n) = err_norms(:,n) / real( this%b(blk)%n_cells_total, dp )
+      end if
+    end do
+  end function get_block_derivative_error_norms
+
   subroutine solve_rec( this, grid, ext_fun, soln_name, output_quad_order, output_derivatives )
-    use set_constants, only : zero
+    use set_constants, only : zero, max_text_line_length
+    use string_stuff,  only : write_integer_tuple
     use combinatorics, only : nchoosek
     use grid_derived_type, only : grid_type
     use function_holder_type, only : func_h_t
@@ -7025,10 +7230,12 @@ contains
     logical,         optional, intent(in)    :: output_derivatives
 
     real(dp), dimension(this%n_vars, 3) :: error_norms
-    integer :: i, blk, n, v
+    integer :: i, blk, n, v, nd, nt
     integer :: term_start, term_end, n_vars
     integer :: quad_order
     logical :: old
+    character(max_text_line_length) :: derivative_index
+    integer, dimension(this%n_dim) :: d_idx
 
     old = .false.
 
@@ -7053,6 +7260,19 @@ contains
         do v = 1,n_vars
           write(*,'(I0,3(" ",ES18.12))') v, (error_norms(v,n), n = 1,3)
         end do
+        if (ext_fun%derivatives_implemented) then
+          do nd = 1,this%b(blk)%p%total_degree
+            do nt = this%b(blk)%p%idx(nd-1)+1,this%b(blk)%p%idx(nd)
+              d_idx = this%b(blk)%p%exponents(:,nt)
+              error_norms = this%get_block_derivative_error_norms( grid, blk, [(n,n=1,n_vars)], term_end, [1,2,huge(1)], ext_fun, d_idx, .false. )
+              call write_integer_tuple(d_idx,derivative_index)
+              write(*,'(A,I0,A)') 'Block ', blk, ' derivative error norms: ('//trim(derivative_index)//')'
+              do v = 1,n_vars
+                write(*,'(I0,3(" ",ES18.12))') v, (error_norms(v,n), n = 1,3)
+              end do
+            end do
+          end do
+        end if
       end if
       if ( this%has_limiter ) then
         call this%limb(blk)%update( this%b(blk), grid%gblock(blk) )
@@ -7062,6 +7282,19 @@ contains
           do v = 1,n_vars
             write(*,'(I0,3(" ",ES18.12))') v, (error_norms(v,n), n = 1,3)
           end do
+          if (ext_fun%derivatives_implemented) then
+            do nd = 1,this%b(blk)%p%total_degree
+              do nt = this%b(blk)%p%idx(nd-1)+1,this%b(blk)%p%idx(nd)
+                d_idx = this%b(blk)%p%exponents(:,nt)
+                error_norms = this%get_block_derivative_error_norms( grid, blk, [(n,n=1,n_vars)], term_end, [1,2,huge(1)], ext_fun, d_idx, .true. )
+                call write_integer_tuple(d_idx,derivative_index)
+                write(*,'(A,I0,A)') 'Block ', blk, ' derivative error norms: ('//trim(derivative_index)//')'
+                do v = 1,n_vars
+                  write(*,'(I0,3(" ",ES18.12))') v, (error_norms(v,n), n = 1,3)
+                end do
+              end do
+            end do
+          end if
         end if
       end if
       if (present(soln_name)) then
@@ -7195,9 +7428,9 @@ contains
     real(dp), dimension(rec%n_dim) :: x
     real(dp), dimension(0,0) :: CELL_DATA
     real(dp), dimension(:,:), allocatable :: NODE_DATA, tmp_var
-    logical, dimension(4) :: opt
+    logical, dimension(6) :: opt
     type(quad_t) :: phys_quad
-    character(*), dimension(4), parameter :: var_prefix = ['REC','EXT','ERR','DIF']
+    character(*), dimension(6), parameter :: var_prefix = ['REC','EXT','ERR','DIF','DEX','DER']
     character(*), dimension(3), parameter :: xyz        = ['x','y','z']
     character(*), dimension(7), parameter :: var_suffix = ['rho',              &
                                                            'u  ',              &
@@ -7212,7 +7445,7 @@ contains
 
     integer :: n_dim, n_node_vars, n_cell_vars, n_vars, n_terms_
     integer :: fid, q, n, i, j, cnt
-    logical :: file_exists
+    logical :: file_exists, has_derivatives
 
     n_dim = rec%n_dim
 
@@ -7230,18 +7463,22 @@ contains
     n_nodes     = num_quad_pts(quad_order_,n_dim,.true.)
 
     opt = .false.
+    has_derivatives = .false.
     if ( present(rec_out)  ) opt(1) = rec_out
     if ( present(ext_fun) ) then
       if ( present(ext_out) ) opt(2) = ext_out
       if ( present(err_out) ) opt(3) = err_out
+      has_derivatives = ext_fun%derivatives_implemented
     end if
     if ( present(diff_out) ) opt(4) = diff_out
+    opt(5) = opt(2).and.opt(4).and.has_derivatives
+    opt(6) = opt(3).and.opt(4).and.has_derivatives
 
     n_terms_ = rec%p%n_terms
     if ( present(n_terms) ) n_terms_ = max(min(n_terms_,n_terms),1)
 
     
-    n_node_vars = n_dim + count(opt(1:3))*rec%n_vars + count([opt(4)])*rec%n_vars*(n_terms_-1)
+    n_node_vars = n_dim + count(opt(1:3))*rec%n_vars + count(opt(4:6))*rec%n_vars*(n_terms_-1)
     n_cell_vars = 0
     n_vars      = n_node_vars + n_cell_vars
 
@@ -7269,15 +7506,16 @@ contains
         write(var_names(cnt),'(A)') var_prefix(j)//':'//trim(var_suffix(i))
       end do
     end do
-    if (opt(4) ) then
+    do j = 4,6
+      if (.not. opt(j)) cycle
       do i = 1,rec%n_vars
         do n = 2,n_terms_
           cnt = cnt + 1
           call write_integer_tuple( rec%p%exponents(:,n), tmp_name )
-          write(var_names(cnt),'(A)') var_prefix(4)//':'//trim(var_suffix(i))//'('//trim(tmp_name)//')'
+          write(var_names(cnt),'(A)') var_prefix(j)//':'//trim(var_suffix(i))//'('//trim(tmp_name)//')'
         end do
       end do
-    end if
+    end do
 
     do q = 1,phys_quad%n_quad
       x = phys_quad%quad_pts(1:n_dim,q)
@@ -7302,6 +7540,26 @@ contains
             cnt = cnt + 1
             tmp_var(1:1,1) = rec%eval( cell_idx, x, [i],              &
                                n_terms=n_terms_, order=rec%p%exponents(:,n), lim=lim )
+            NODE_DATA(cnt,q) = tmp_var(1,1)
+          end do
+        end do
+      end if
+      if (opt(5) ) then
+        do i = 1,rec%n_vars
+          do n = 2,n_terms_
+            cnt = cnt + 1
+            tmp_var(1:1,1) = ext_fun%dx_eval(x,order=rec%p%exponents(:,n))
+            NODE_DATA(cnt,q) = tmp_var(1,1)
+          end do
+        end do
+      end if
+      if (opt(6) ) then
+        do i = 1,rec%n_vars
+          do n = 2,n_terms_
+            cnt = cnt + 1
+            tmp_var(1:1,1) = rec%eval( cell_idx, x, [i],              &
+                               n_terms=n_terms_, order=rec%p%exponents(:,n), lim=lim ) &
+                               - ext_fun%dx_eval(x,order=rec%p%exponents(:,n))
             NODE_DATA(cnt,q) = tmp_var(1,1)
           end do
         end do
@@ -7495,6 +7753,7 @@ contains
     use test_function_1,      only : test_fun1_t
     use test_function_2,      only : test_fun2_t
     use test_function_3,      only : test_fun3_t
+    use test_function_4,      only : test_fun4_t
     use cross_term_sinusoid,  only : cts_t
     use cylinder_cone_bump,   only : ccb_t
     use message,              only : error_message
@@ -7511,12 +7770,14 @@ contains
                                     space_scale=space_scale, &
                                     space_origin=space_origin) )
     case(4)
+      allocate( eval_fun, source=test_fun4_t( n_dim, n_rec_vars ) )
+    case(5)
       allocate( eval_fun, source=cts_t( n_dim, n_rec_vars,       &
                                     rand_coefs=rand_coefs,   &
                                     rand_seed=rand_seed,     &
                                     space_scale=space_scale, &
                                     space_origin=space_origin) )
-    case(5)
+    case(6)
       allocate( eval_fun, source=ccb_t( n_dim, n_rec_vars,       &
                                     space_scale=space_scale, &
                                     space_origin=space_origin) )
