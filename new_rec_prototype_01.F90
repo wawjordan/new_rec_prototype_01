@@ -94,18 +94,48 @@ module string_stuff
   public :: progress_line, iteration_line
   public :: write_integer_tuple
 contains
-  subroutine write_integer_tuple(integer_list,out_string)
-    integer, dimension(:), intent(in)  :: integer_list
-    character(*),          intent(out) :: out_string
+  subroutine write_integer_tuple(integer_list,out_string,plus,delim)
+    integer, dimension(:),  intent(in)  :: integer_list
+    character(*),           intent(out) :: out_string
+    logical,      optional, intent(in)  :: plus
+    character(*), optional, intent(in)  :: delim
     integer :: j, sz
-    character(20) :: tmp_debug
+    character(1) :: p
+    p = ' '
+    if ( present(plus) ) then
+      if ( plus ) p = '+'
+    end if
     sz = size(integer_list)
     out_string=''
     if (sz<1) return
-    write(out_string,'(I0)') integer_list(1)
-    do j = 2,sz
-      write(out_string,'(A,I0)') trim(out_string)//',',integer_list(j)
-    end do
+    if ( integer_list(1)>0 ) then
+      write(out_string,'(A,I0)') trim(out_string)//p,integer_list(1)
+    elseif ( integer_list(1)==0 ) then
+      write(out_string,'(A,I0)') trim(out_string)//' ',integer_list(1)
+    else
+      write(out_string,'(A,I0)') trim(out_string),integer_list(1)
+    end if
+    if ( present(delim) ) then
+      do j = 2,sz
+        if ( integer_list(j)>0 ) then
+          write(out_string,'(A,I0)') trim(out_string)//delim//p,integer_list(j)
+        elseif ( integer_list(j)==0 ) then
+          write(out_string,'(A,I0)') trim(out_string)//delim//' ',integer_list(j)
+        else
+          write(out_string,'(A,I0)') trim(out_string)//delim,integer_list(j)
+        end if
+      end do
+    else
+      do j = 2,sz
+        if ( integer_list(j)>0 ) then
+          write(out_string,'(A,I0)') trim(out_string)//', '//p,integer_list(j)
+        elseif ( integer_list(j)==0 ) then
+          write(out_string,'(A,I0)') trim(out_string)//',  ',integer_list(j)
+        else
+          write(out_string,'(A,I0)') trim(out_string)//', ',integer_list(j)
+        end if
+      end do
+    end if
   end subroutine write_integer_tuple
   
   subroutine generate_newline_string(strings,out_fmt)
@@ -927,6 +957,7 @@ module stencil_indexing
   public :: linear_map_offsets_check
   public :: inviscid_stencil_indices_3D
   public :: viscous_offsets, muscl_offsets, center_offsets
+  public :: sector_offsets, identify_sector_stencils
 
   public :: get_bounding_box
 
@@ -1229,6 +1260,73 @@ contains
       end do
     end do
   end subroutine inviscid_stencil_indices_3D
+
+  pure subroutine sector_offsets(direction,n_dim,offsets)
+    use index_conversion, only : shift_val_to_start
+    integer,                             intent(in)  :: direction, n_dim
+    integer, dimension(n_dim,2*n_dim-1), intent(out) :: offsets
+    integer, dimension(n_dim) :: d
+    integer :: s, dir
+    integer :: i, j, k, cnt
+    offsets = 0
+    dir = abs(direction)
+    s   = sign(1,direction)
+    do i = 1,n_dim
+      d(i) = i
+    end do
+    call shift_val_to_start(d,dir)
+    offsets(dir,:) = s
+    cnt = 1
+    do i = 2,n_dim
+      do j = -1,1,2
+        cnt = cnt + 1
+        offsets(d(i),cnt) = j
+      end do
+    end do
+  end subroutine sector_offsets
+
+  pure subroutine identify_sector_stencils(n_dim,n_stencil,stencil_idxs,n_sec,n_sec_idx,sec_idx)
+    integer, intent(in) :: n_dim, n_stencil
+    integer, dimension(n_dim+1,n_stencil), intent(in) :: stencil_idxs
+    integer, intent(out) :: n_sec
+    integer, dimension(2*n_dim), intent(out) :: n_sec_idx
+    integer, dimension(2*n_dim-1,2*n_dim), intent(out) :: sec_idx
+    integer :: d, s, i, j, k
+    integer, dimension(n_dim,2*n_dim-1) :: sec_off
+    integer, dimension(n_dim+1) :: tmp_idx
+
+    n_sec     = 0
+    n_sec_idx = 0
+    sec_idx   = 0
+
+    n_sec = 0
+    ! for each face
+    do d = 1,n_dim
+      do s = -1,1,2
+        call sector_offsets(d*s,n_dim,sec_off)
+        ! for each cell in the sector stencil
+        do k = 1,2*n_dim-1
+          ! check against all cells in stencil
+          do j = 2,n_stencil
+            tmp_idx = stencil_idxs(:,1)
+            tmp_idx(2:) = tmp_idx(2:) + sec_off(:,k)
+
+            if (all(tmp_idx==stencil_idxs(:,j))) then
+
+              ! increment the counter for this sector stencil
+              n_sec_idx(n_sec+1) = n_sec_idx(n_sec+1) + 1
+              ! save the location in the stencil
+              sec_idx( n_sec_idx(n_sec+1), n_sec+1 ) = j
+            end if
+          end do
+        end do
+        ! if there was any intersection, then increment the counter over the sector stencils
+        if ( n_sec_idx(n_sec+1) > 0 ) then
+          n_sec = n_sec+1
+        end if
+      end do
+    end do
+  end subroutine identify_sector_stencils
 
   pure subroutine viscous_offsets(direction,ndim,offsets)
     use index_conversion, only : shift_val_to_start
@@ -1580,22 +1678,40 @@ module stencil_growing_routines
 
   contains
 
-  pure subroutine grow_stencil_basic( block_id, idx, N_cells, sz_in, sz_out, nbor_block, nbor_idx, nbor_degree, on_boundary )
+  pure subroutine grow_stencil_basic( block_id, idx, N_cells, sz_in, sz_out, nbor_block, nbor_idx, nbor_degree, on_boundary, n_sec, n_sec_idx, sec_idx )
     use stencil_cell_derived_type, only : block_info
     use index_conversion,          only : local2global_bnd
-    use stencil_indexing,          only : sort_stencil_idx
+    use stencil_indexing,          only : identify_sector_stencils
     integer,                              intent(in)  :: block_id
     integer, dimension(3),                intent(in)  :: idx, N_cells
     integer,                              intent(in)  :: sz_in
     integer,                              intent(out) :: sz_out
     integer, dimension(6*sz_in),          intent(out) :: nbor_block, nbor_idx, nbor_degree
     logical, dimension(6,6*sz_in), optional, intent(out) :: on_boundary
+    integer,                       optional, intent(out) :: n_sec
+    integer, dimension(6),         optional, intent(out) :: n_sec_idx
+    integer, dimension(5,6),       optional, intent(out) :: sec_idx
     type(block_info), dimension(1) :: bi
     integer, dimension(4,6*sz_in) :: idx_list
     integer :: i
+
+    integer                 :: n_sec_
+    integer, dimension(6)   :: n_sec_idx_
+    integer, dimension(5,6) :: sec_idx_
+
     bi(1) = block_info(block_id,N_cells)
     call grow_stencil_new_connected_block( block_id, idx, bi, sz_in, sz_out, idx_list, nbor_degree, on_boundary=on_boundary )
     call bi%destroy()
+
+    n_sec_     = 0
+    n_sec_idx_ = 0
+    sec_idx_   = 0
+    if ( present(n_sec).or.present(n_sec_idx).or.present(sec_idx)) then
+      call identify_sector_stencils(3,sz_out,idx_list(:,1:sz_out),n_sec_,n_sec_idx_,sec_idx_)
+      if ( present(n_sec)     ) n_sec     = n_sec_
+      if ( present(n_sec_idx) ) n_sec_idx = n_sec_idx_
+      if ( present(sec_idx)   ) sec_idx   = sec_idx_
+    end if
 
     nbor_block = 0
     nbor_idx   = 0
@@ -1603,6 +1719,7 @@ module stencil_growing_routines
       nbor_block(i) = idx_list(1,i)
       nbor_idx(i)   = local2global_bnd( idx_list(2:4,i), [1,1,1], N_cells )
     end do
+
   end subroutine grow_stencil_basic
 
   pure function get_max_degree( block_id, idx, N_cells, sz_in ) result(max_degree)
@@ -6080,8 +6197,9 @@ module reconstruct_cell_derived_type
     integer :: n_vars
     integer :: self_idx
     integer :: self_block
-    integer :: n_nbor, n_bnd
-    integer, dimension(:), allocatable :: nbor_block, nbor_idx, nbor_degree, bnd_idx
+    integer :: n_nbor, n_bnd, n_sec
+    integer, dimension(:), allocatable :: nbor_block, nbor_idx, nbor_degree, bnd_idx, n_sec_idx
+    integer, dimension(:,:), allocatable :: sec_idx
   contains
     private
     procedure, public, pass :: destroy => destroy_cell_rec
@@ -6103,6 +6221,8 @@ contains
     if ( allocated(this%nbor_idx   ) ) deallocate( this%nbor_idx   )
     if ( allocated(this%nbor_degree) ) deallocate( this%nbor_degree)
     if ( allocated(this%bnd_idx    ) ) deallocate( this%bnd_idx    )
+    if ( allocated(this%n_sec_idx  ) ) deallocate( this%n_sec_idx  )
+    if ( allocated(this%sec_idx    ) ) deallocate( this%sec_idx    )
     if ( allocated(this%coefs      ) ) deallocate( this%coefs      )
     if ( allocated(this%Ainv       ) ) deallocate( this%Ainv       )
     if ( allocated(this%col_scale  ) ) deallocate( this%col_scale  )
@@ -6111,6 +6231,7 @@ contains
     this%self_block = 0
     this%n_nbor     = 0
     this%n_bnd      = 0
+    this%n_sec      = 0
   end subroutine destroy_cell_rec
 
   pure function constructor( p, self_block, self_idx, n_nbor, n_bnd, nbor_block, nbor_idx, nbor_degree, bnd_idx, n_vars, quad, h_ref ) result(this)
@@ -6137,6 +6258,8 @@ contains
     allocate( this%coefs( p%n_terms, n_vars ) )
     allocate( this%Ainv(  p%n_terms-1, n_nbor ) )
     allocate( this%col_scale( p%n_terms-1     ) )
+    allocate( this%n_sec_idx( 2*p%n_dim ) ) ! number of faces
+    allocate( this%sec_idx( 2*p%n_dim-1,2*p%n_dim ) )
     this%nbor_block  = nbor_block(1:n_nbor)
     this%nbor_idx    = nbor_idx(1:n_nbor)
     this%nbor_degree = nbor_degree(1:n_nbor)
@@ -6627,16 +6750,24 @@ contains
     integer, dimension(6*min_sz), intent(out) :: nbor_block, nbor_idx, degree
     integer,                intent(out) :: n_bnd
     integer, dimension(6),  intent(out) :: bnd_idx
+    integer :: n_sec
+    integer, dimension(2*this%p%n_dim) :: n_sec_idx
+    integer, dimension(2*this%p%n_dim-1,2*this%p%n_dim) :: sec_idx
     integer, dimension(6*min_sz) :: tmp
     integer :: i
     logical, dimension(6,6*min_sz) :: on_boundary
     integer, dimension(3) :: idx_tmp, lo, hi
+
+    integer, dimension(6)   :: n_sec_idx_
+    integer, dimension(5,6) :: sec_idx_
     lo = 1
     hi = 1
     hi(1:this%n_dim) = this%n_cells
     idx_tmp = 1
     idx_tmp(1:this%n_dim) = global2local_bnd( lin_idx, lo(1:this%n_dim), hi(1:this%n_dim) )
-    call grow_stencil_basic( blk, idx_tmp, hi, min_sz, n_nbors, nbor_block, nbor_idx, degree, on_boundary=on_boundary )
+    call grow_stencil_basic( blk, idx_tmp, hi, min_sz, n_nbors, nbor_block, nbor_idx, degree, on_boundary=on_boundary, n_sec=n_sec, n_sec_idx=n_sec_idx_, sec_idx=sec_idx_ )
+    n_sec_idx(1:n_sec) = n_sec_idx_(1:n_sec)
+    sec_idx = sec_idx_(1:2*this%p%n_dim-1,1:2*this%p%n_dim)
 
     !
     n_bnd   = count(on_boundary(1:2*this%p%n_dim,1))
@@ -7836,6 +7967,33 @@ program main
   call deallocate_inputs()
   write(*,*) 'Elapsed time: ', timer%toc()
 end program main
+
+! program main
+!   use string_stuff,     only : write_integer_tuple
+!   use stencil_indexing, only : sector_offsets
+!   implicit none
+!   integer, dimension(:,:), allocatable :: offsets
+!   integer :: n_dim, dir
+!   integer :: i, s, d
+!   character(100) :: tmp_str
+
+!   n_dim = 3
+!   dir   = 1
+!   allocate( offsets(n_dim,2*n_dim-1))
+!   do d = 1,n_dim
+!     do s = -1,1,2
+!       write(*,*)
+!       write(*,'(A,I0,A,SP,I2,A)') '(',d,',',s,')'
+!       dir = d*s
+!       call sector_offsets(dir,n_dim,offsets)
+!       do i = 1,size(offsets,2)
+!         call write_integer_tuple(offsets(:,i),tmp_str,plus=.true.)
+!         write(*,'(I0,A)') i, ' : ('//trim(tmp_str)//')'
+!       end do
+!     end do
+!   end do
+!   deallocate( offsets )
+! end program main
 
 ! program main
 !   use set_precision, only : dp
